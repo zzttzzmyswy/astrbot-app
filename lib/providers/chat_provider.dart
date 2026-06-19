@@ -285,6 +285,11 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       }
 
       _client!.state.listen((s) {
+        // G4:流式进行中连接断开(complete/end 未到)→ 把已积累文本落盘标注中断,
+        // 避免孤儿气泡/丢失。complete/end 到达时 streamingText 已被清空,不触发。
+        if (s == ConnState.disconnected || s == ConnState.reconnecting) {
+          _flushInterruptedStream();
+        }
         // Don't clear config errors when connecting
         final err = (s == ConnState.connected && state.errorMessage != null && state.errorMessage!.contains('配置'))
             ? state.errorMessage
@@ -489,6 +494,26 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     } else {
       failMediaUpload(createdAt);
     }
+  }
+
+  /// 生成中途断网兜底:若 streamingText 非空且本轮未完成(complete/end 会清空它),
+  /// 落盘为一条带「中断」后缀的 bot 文本消息。
+  void _flushInterruptedStream() {
+    final interrupted = interruptedBotText(state.streamingText);
+    if (interrupted == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final botMsg = LocalMessage(
+      msgType: 'text',
+      content: interrupted,
+      isFromMe: false,
+      status: MessageStatus.sent,
+      createdAt: now,
+    );
+    _cache.upsertBotText(botMsg);
+    state = state.copyWith(
+      messages: [...state.messages, botMsg],
+      streamingText: null,
+    );
   }
 
   void _handleEvent(ChatEvent event) {
