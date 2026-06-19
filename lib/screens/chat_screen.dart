@@ -947,6 +947,10 @@ class _ImageBubbleState extends ConsumerState<_ImageBubble> {
       );
     }
     final errored = (widget.m.status as MessageStatus?) == MessageStatus.error;
+    // 占位图标需按气泡背景取色:我发出(紫底)用半透明白;对方(灰底,下载中)用紫色强调,
+    // 否则 white54 在浅灰对方气泡上几乎不可见。
+    final placeholderColor =
+        widget.isMe ? Colors.white54 : const Color(0xFF5B4BD6);
     return SizedBox(
       width: w, height: w * 0.6,
       child: errored
@@ -963,8 +967,9 @@ class _ImageBubbleState extends ConsumerState<_ImageBubble> {
           : (uploading
               ? Center(child: _UploadBadge(progress: prog))
               : (_loading
-                  ? const Center(child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)))
-                  : const Icon(Icons.image, size: 48, color: Colors.white54))),
+                  ? Center(child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(
+                      strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(placeholderColor))))
+                  : Icon(Icons.image, size: 48, color: placeholderColor))),
     );
   }
 }
@@ -1176,6 +1181,8 @@ class _FileBubbleState extends ConsumerState<_FileBubble> {
     final errored = (widget.m.status as MessageStatus?) == MessageStatus.error;
     final prog = (widget.m.uploadProgress as double?) ?? 0;
     final accent = const Color(0xFF5B4BD6);
+    // 我发出的气泡是紫色:文件图标用白色系保证对比度;对方气泡(灰)用紫色强调。
+    final onBubble = widget.isMe ? Colors.white : accent;
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -1186,15 +1193,18 @@ class _FileBubbleState extends ConsumerState<_FileBubble> {
           Row(crossAxisAlignment: CrossAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
             Container(
               width: 34, height: 34, alignment: Alignment.center,
-              decoration: BoxDecoration(color: accent.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(8)),
+              decoration: BoxDecoration(color: errored
+                  ? Colors.redAccent.withValues(alpha: 0.15)
+                  : onBubble.withValues(alpha: widget.isMe ? 0.25 : 0.12), borderRadius: BorderRadius.circular(8)),
               child: uploading
                 ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(
                     value: prog > 0 ? prog : null, strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(accent)))
+                    valueColor: AlwaysStoppedAnimation<Color>(onBubble)))
                 : (_downloading
-                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(
+                        strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(onBubble.withValues(alpha: 0.8))))
                     : Icon(errored ? Icons.refresh_rounded : Icons.description_rounded,
-                        color: errored ? Colors.redAccent : accent, size: 18)),
+                        color: errored ? Colors.redAccent : onBubble, size: 18)),
             ),
             const SizedBox(width: 10),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
