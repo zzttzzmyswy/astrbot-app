@@ -1,5 +1,8 @@
 // lib/util/retry.dart
+import 'dart:async';
+import 'dart:io' show SocketException;
 import 'package:dio/dio.dart';
+import 'package:http/http.dart' as http;
 
 /// 判断一个错误是否值得重试(瞬态、网络相关)。
 /// 4xx badResponse、cancel、unknown 默认不重试。
@@ -41,4 +44,18 @@ Future<T> withRetry<T>(
     }
   }
   throw lastErr!;
+}
+
+/// http 包等价的瞬态错误判定(供 SSE 首字节前重试用)。
+/// 与 [isTransientDioError] 对齐:连接超时、socket 重置、连接级 http 异常视为瞬态;
+/// 其余(含 4xx body 语义)默认不重试。
+bool isTransientHttpError(Object e) {
+  if (e is SocketException) return true; // 连接重置/拒绝/断网
+  if (e is TimeoutException) return true; // .timeout() 触发
+  if (e is http.ClientException) {
+    // http 包无更细的错误子类型;连接失败/解析失败都包成 ClientException。
+    // 首字节前重试最多 3 次,代价可控,保守按瞬态处理。
+    return true;
+  }
+  return false;
 }

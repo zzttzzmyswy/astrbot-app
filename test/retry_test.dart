@@ -1,6 +1,9 @@
 // test/retry_test.dart
+import 'dart:async';
+import 'dart:io' show SocketException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:dio/dio.dart';
+import 'package:http/http.dart' as http;
 import 'package:astrbot_app/util/retry.dart';
 
 void main() {
@@ -93,6 +96,22 @@ void main() {
           throwsA(isA<StateError>()));
       await Future.delayed(Duration.zero);
       expect(calls, 1);
+    });
+  });
+
+  group('isTransientHttpError', () {
+    test('SocketException / TimeoutException 视为瞬态', () {
+      expect(isTransientHttpError(SocketException('reset by peer')), isTrue);
+      expect(isTransientHttpError(TimeoutException('timed out')), isTrue);
+    });
+    test('连接级 http ClientException 视为瞬态', () {
+      expect(
+          isTransientHttpError(http.ClientException('Failed host lookup')),
+          isTrue);
+    });
+    test('普通异常不重试', () {
+      expect(isTransientHttpError(StateError('boom')), isFalse);
+      expect(isTransientHttpError(FormatException('bad')), isFalse);
     });
   });
 }
