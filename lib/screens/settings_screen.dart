@@ -112,7 +112,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           }),
           ListTile(
             title: const Text('连接模式'),
-            subtitle: Text(_config.connectionMode == 'sse' ? 'SSE（默认，更稳定）' : 'WebSocket'),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(_config.connectionMode == 'sse'
+                    ? 'SSE（默认，更稳定）'
+                    : 'WebSocket'),
+                const SizedBox(height: 2),
+                const Text(
+                  'SSE 仅在请求-响应期间收发;需要后台实时接收 bot 推送请用 WebSocket',
+                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
             trailing: DropdownButton<String>(
               value: _config.connectionMode,
               underline: const SizedBox(),
