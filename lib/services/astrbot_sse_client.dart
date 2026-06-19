@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/chat_event.dart';
 import '../util/reconnect.dart';
+import '../util/retry.dart';
 
 class AstrBotSseClient {
   final String serverUrl;
@@ -113,15 +114,19 @@ class AstrBotSseClient {
     });
   }
 
-  void sendMessage(List<Map<String, dynamic>> messageParts) {
+  /// SSE 发送是 fire-and-forget 的异步 POST:同步返回恒为 `true`(乐观)。
+  /// 真正的失败经事件流(`error` 事件)+ 重连回传,由 ChatNotifier 的在途
+  /// 跟踪把对应消息翻成 `error`。返回 bool 仅是为了与 WS 客户端签名一致。
+  bool sendMessage(List<Map<String, dynamic>> messageParts) {
     _startIdleWatchdog();
     if (_disposed) {
       _eventController.add(ChatEvent.fromJson({'type': 'error', 'data': '连接已断开，请重启应用'}));
-      return;
+      return false;
     }
     _sendHttpMessage(messageParts).catchError((e) {
       _eventController.add(ChatEvent.fromJson({'type': 'error', 'data': '发送失败: $e'}));
     });
+    return true;
   }
 
   Future<void> _sendHttpMessage(List<Map<String, dynamic>> messageParts) async {
@@ -145,7 +150,15 @@ class AstrBotSseClient {
       request.body = body;
 
       _awaitingFirstByte = true;
-      final streamedResponse = await client.send(request).timeout(const Duration(seconds: 300));
+      // 首字节前重试:建立连接 / 等待响应头阶段若遇瞬态错误(连接重置/超时)
+      // 则按指数退避重试,与 FileService 一致。一旦拿到 streamedResponse
+      // 即视为请求已送达,后续流式解析不在重试范围内(中途断开由上层兜底)。
+      final streamedResponse = await withRetry(
+        () => client!.send(request).timeout(const Duration(seconds: 300)),
+        isTransient: isTransientHttpError,
+        maxAttempts: 3,
+        delayFor: (i) => Duration(milliseconds: 1000 << i),
+      );
 
       if (streamedResponse.statusCode != 200) {
         _eventController.add(ChatEvent.fromJson({
