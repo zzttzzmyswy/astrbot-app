@@ -1,0 +1,22 @@
+.superpowers/
+.claude/
+build/
+.dart_tool/
+.idea/
+*.iml
+.packages
+.pub-cache/
+.pub/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.lock
+!pubspec.lock
+
+# 本地敏感/环境文件
+**/local.properties
+/android/.gradle/
+/android/key.properties
+*.keystore
+*.jks
+coverage/
+*.log
