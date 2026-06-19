@@ -95,10 +95,14 @@ class UpdateService {
     }
   }
 
-  /// 下载 APK 到应用私有目录,返回本地路径。[onProgress] 为 0..1。
+  /// 下载 APK 到应用 cache 目录(对应 Android 的 /data/data/<pkg>/cache,
+  /// 已在 file_paths.xml 的 <cache-path> 中配置,可被 FileProvider 暴露)。
+  /// 注意:不能用 getApplicationDocumentsDirectory(),它映射到 app_flutter,
+  /// 不在 FileProvider 已配置的根下,会导致安装时 "failed to find configured
+  /// root" 报错。[onProgress] 为 0..1。
   Future<String> download(String url,
       {void Function(double progress)? onProgress}) async {
-    final dir = await getApplicationDocumentsDirectory();
+    final dir = await getTemporaryDirectory();
     final savePath = '${dir.path}/astrbot-update.apk';
     final dio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 15),
