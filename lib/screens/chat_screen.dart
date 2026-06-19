@@ -685,7 +685,10 @@ class _Bubble extends StatelessWidget {
         body = _FileBubble(m: m, fg: fg, isMe: isMe);
         break;
       default:
-        body = _mdText(text, fg, isDark);
+        final errored = (m.status as MessageStatus?) == MessageStatus.error;
+        body = errored
+            ? _TextBodyError(content: text, createdAt: (m.createdAt as int?) ?? 0)
+            : _mdText(text, fg, isDark);
     }
 
     final createdAt = (m.createdAt as int?) ?? 0;
@@ -742,6 +745,37 @@ class _Bubble extends StatelessWidget {
       if (c == 0x2A || c == 0x5F || c == 0x60 || c == 0x7E || c == 0x23 || c == 0x7C || c == 0x3E || c == 0x5B) return true;
     }
     return false;
+  }
+}
+
+/// 文本气泡发送失败态:点击重发(复用 retryTextSend,与媒体失败态对称)。
+class _TextBodyError extends ConsumerWidget {
+  final String content;
+  final int createdAt;
+  const _TextBodyError({required this.content, required this.createdAt});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => ref.read(chatProvider.notifier).retryTextSend(createdAt),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        const Icon(Icons.error_outline_rounded, color: Colors.redAccent, size: 16),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text(
+            content,
+            style: const TextStyle(
+                color: Colors.redAccent,
+                fontSize: 15,
+                height: 1.35,
+                decoration: TextDecoration.lineThrough),
+          ),
+        ),
+        const SizedBox(width: 6),
+        const Icon(Icons.refresh_rounded, color: Colors.redAccent, size: 16),
+      ]),
+    );
   }
 }
 
