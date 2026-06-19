@@ -1000,6 +1000,8 @@ class _VoiceBubbleState extends ConsumerState<_VoiceBubble> {
   @override Widget build(BuildContext ctx) {
     final fg = widget.fg;
     final accent = const Color(0xFF5B4BD6);
+    // 我发出的气泡是紫色:播放控件用白色系保证对比度;对方气泡(浅/深灰)用紫色强调。
+    final onBubble = widget.isMe ? Colors.white : accent;
     final m = widget.m as LocalMessage;
     final pb = ref.watch(audioPlaybackProvider);
     final player = ref.read(audioPlaybackProvider.notifier);
@@ -1010,9 +1012,9 @@ class _VoiceBubbleState extends ConsumerState<_VoiceBubble> {
       return Row(mainAxisSize: MainAxisSize.min, children: [
         Container(
           width: 30, height: 30, alignment: Alignment.center,
-          decoration: BoxDecoration(color: accent.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(8)),
+          decoration: BoxDecoration(color: onBubble.withValues(alpha: widget.isMe ? 0.25 : 0.12), borderRadius: BorderRadius.circular(8)),
           child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(
-            value: prog > 0 ? prog : null, strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(accent)))),
+            value: prog > 0 ? prog : null, strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(onBubble)))),
         const SizedBox(width: 10),
         Text('语音上传中 ${(prog * 100).round()}%', style: TextStyle(color: fg, fontSize: 13, fontWeight: FontWeight.w500)),
       ]);
@@ -1062,9 +1064,9 @@ class _VoiceBubbleState extends ConsumerState<_VoiceBubble> {
           width: 30, height: 30, alignment: Alignment.center,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: active ? accent : accent.withValues(alpha: 0.14)),
+            color: active ? onBubble : onBubble.withValues(alpha: widget.isMe ? 0.25 : 0.14)),
           child: Icon(playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-              color: active ? Colors.white : accent, size: 18))),
+              color: active ? (widget.isMe ? accent : Colors.white) : onBubble, size: 18))),
       const SizedBox(width: 8),
       SizedBox(
         width: 76,
@@ -1073,9 +1075,9 @@ class _VoiceBubbleState extends ConsumerState<_VoiceBubble> {
             trackHeight: 3,
             thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
             overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-            activeTrackColor: accent,
+            activeTrackColor: onBubble,
             inactiveTrackColor: fg.withValues(alpha: 0.3),
-            thumbColor: accent,
+            thumbColor: onBubble,
           ),
           child: Slider(
             value: val,
