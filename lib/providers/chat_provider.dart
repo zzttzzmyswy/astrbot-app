@@ -15,6 +15,7 @@ import '../services/cache_service.dart';
 import '../services/config_service.dart';
 import '../services/file_service.dart';
 import '../util/lifecycle_reconnect.dart';
+import '../util/outbound.dart';
 import 'config_provider.dart';
 
 final chatProvider = StateNotifierProvider<ChatNotifier, ChatState>((ref) {
@@ -136,6 +137,10 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
   int _historyOffset = 0;
   bool _hasMoreHistory = true;
   AudioPlaybackNotifier? _playback;
+  /// SSE 在途跟踪:当前正在等服务端响应的「我发出」文本消息的 createdAt。
+  /// 仅 SSE 模式用 —— SSE 发送是 fire-and-forget,真正的失败经 error 事件回传,
+  /// 靠这个把失败关联回具体消息。收到该消息的首个流式事件/complete/end 即清空。
+  int? _inflightTextCreatedAt;
 
   ChatNotifier(this._config) : super(ChatState(autoPlayVoice: _config.autoPlayVoice)) {
     WidgetsBinding.instance.addObserver(this);
@@ -323,21 +328,65 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       toolCalls: [],
       toolResults: [],
     );
+    _cache.insertMessage(localMsg);
+    _dispatchText(createdAt: now, text: text, msgParts: msgParts);
+  }
 
-    if (state.connectionState == ConnState.connected && _client != null) {
-      _client!.sendMessage(msgParts);
-      state = state.copyWith(
-        messages: state.messages
-            .map((m) => m.createdAt == now ? m.copyWith(status: MessageStatus.sent) : m)
-            .toList(),
-      );
+  /// 把一条文本消息真正发到线上(新发与重发共用)。
+  /// - 已连接:发送;SSE 记在途用于失败关联;WS 死 socket 则保持 pending 入队等重连。
+  /// - 未连接:入 pendingQueue,重连后由 drain 重发。
+  void _dispatchText({
+    required int createdAt,
+    required String text,
+    required List<Map<String, dynamic>> msgParts,
+  }) {
+    final conn = state.connectionState;
+    if (conn == ConnState.connected && _client != null) {
+      final ok = _client!.sendMessage(msgParts) as bool;
+      if (_usingWs) {
+        if (ok) {
+          state = state.copyWith(
+            messages: state.messages
+                .map((m) => m.createdAt == createdAt
+                    ? m.copyWith(status: MessageStatus.sent)
+                    : m)
+                .toList(),
+          );
+        } else {
+          // WS 死 socket:_forceReconnect 已治愈连接;消息保持 pending 入队,
+          // 重连成功后由现有 pending drain 重发,不丢失。
+          _pendingQueue.add(msgParts);
+        }
+      } else {
+        // SSE:发送恒返回 true(乐观),标 sent;失败经 error 事件回传再翻 error。
+        _inflightTextCreatedAt = createdAt;
+        state = state.copyWith(
+          messages: state.messages
+              .map((m) => m.createdAt == createdAt
+                  ? m.copyWith(status: MessageStatus.sent)
+                  : m)
+              .toList(),
+        );
+      }
     } else {
       _pendingQueue.add(msgParts);
       if (_client == null) {
         state = state.copyWith(errorMessage: '客户端未初始化');
       }
     }
-    _cache.insertMessage(localMsg);
+  }
+
+  /// 重发失败的文本消息(用户在失败文本气泡上点击重试)。
+  Future<void> retryTextSend(int createdAt) async {
+    final idx = state.messages
+        .indexWhere((m) => m.createdAt == createdAt && m.isFromMe);
+    if (idx < 0) return;
+    final text = state.messages[idx].content;
+    if (text == null || text.isEmpty) return;
+    // 复位为 pending,供 UI 反馈。
+    state = state.copyWith(messages: setMessagePending(state.messages, createdAt));
+    final msgParts = <Map<String, dynamic>>[{'type': 'plain', 'text': text}];
+    _dispatchText(createdAt: createdAt, text: text, msgParts: msgParts);
   }
 
   /// Create an "uploading" placeholder bubble for an outgoing media message
@@ -471,6 +520,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
         break;
 
       case 'plain':
+        if (!_usingWs) _inflightTextCreatedAt = null;
         final currentStreaming = state.streamingText ?? '';
         state = state.copyWith(streamingText: currentStreaming + (event.data ?? ''));
         break;
@@ -567,6 +617,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
         break;
 
       case 'complete':
+        _inflightTextCreatedAt = null;
         if (state.streamingText != null && state.streamingText!.isNotEmpty) {
           final botMsg = LocalMessage(
             msgType: 'text',
@@ -588,6 +639,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
         break;
 
       case 'end':
+        _inflightTextCreatedAt = null;
         if (state.streamingText != null && state.streamingText!.isNotEmpty) {
           final botMsg = LocalMessage(
             msgType: 'text',
@@ -607,6 +659,16 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
         break;
 
       case 'error':
+        // SSE 在途文本失败:把对应消息翻成 error(供点击重发)。
+        if (!_usingWs && _inflightTextCreatedAt != null) {
+          final inflight = _inflightTextCreatedAt!;
+          _inflightTextCreatedAt = null;
+          final msgs = markOutboundError(state.messages, inflight);
+          for (final m in msgs) {
+            if (m.createdAt == inflight && m.isFromMe) _cache.upsert(m);
+          }
+          state = state.copyWith(messages: msgs);
+        }
         state = state.copyWith(errorMessage: event.data ?? '未知错误');
         break;
     }
