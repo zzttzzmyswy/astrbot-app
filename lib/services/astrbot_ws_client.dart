@@ -140,7 +140,12 @@ class AstrBotWsClient {
     }
   }
 
-  void sendMessage(List<Map<String, dynamic>> messageParts) {
+  /// 返回是否同步发送成功。WS 的 `sink.add` 同步可知成败:
+  /// - 成功 → 消息已进入 socket 缓冲,视为已发送。
+  /// - 死 socket → 返回 false 并触发 [_forceReconnect] 治愈连接;
+  ///   调用方(ChatNotifier)据此把该消息保持 `pending` 入队,等重连后重发,
+  ///   不再静默丢弃。
+  bool sendMessage(List<Map<String, dynamic>> messageParts) {
     final payload = {
       't': 'send',
       'username': username,
@@ -148,11 +153,12 @@ class AstrBotWsClient {
       'message': messageParts,
       'config_id': configId,
     };
-    if (!_sendRaw(jsonEncode(payload))) {
-      // Socket is closed/dead — heal the connection instead of silently
-      // dropping the outbound message.
-      _forceReconnect();
+    if (_sendRaw(jsonEncode(payload))) {
+      return true;
     }
+    // Socket is closed/dead — heal the connection (治连接) + 通知调用方未送达。
+    _forceReconnect();
+    return false;
   }
 
   /// Returns false if the write could not be performed (dead socket).
