@@ -95,6 +95,7 @@ class ChatState {
   final List<ToolCall> toolCalls;
   final List<ToolResult> toolResults;
   final bool autoPlayVoice;
+  final bool backgroundDisconnect;
 
   const ChatState({
     this.messages = const [],
@@ -104,6 +105,7 @@ class ChatState {
     this.toolCalls = const [],
     this.toolResults = const [],
     this.autoPlayVoice = false,
+    this.backgroundDisconnect = false,
   });
 
   ChatState copyWith({
@@ -114,6 +116,7 @@ class ChatState {
     List<ToolCall>? toolCalls,
     List<ToolResult>? toolResults,
     bool? autoPlayVoice,
+    bool? backgroundDisconnect,
   }) =>
       ChatState(
         messages: messages ?? this.messages,
@@ -123,6 +126,7 @@ class ChatState {
         toolCalls: toolCalls ?? this.toolCalls,
         toolResults: toolResults ?? this.toolResults,
         autoPlayVoice: autoPlayVoice ?? this.autoPlayVoice,
+        backgroundDisconnect: backgroundDisconnect ?? this.backgroundDisconnect,
       );
 }
 
@@ -148,8 +152,45 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (shouldReconnectOnResume(current: state, isConnected: state2IsConnected)) {
+    if (state != AppLifecycleState.resumed) return;
+    _onAppResumed();
+  }
+
+  /// 回前台处理:优先检测 WS「僵尸」连接(仍报告 connected,但进程被 OS 冻结期间
+  /// 无入站帧,_lastReceivedAt 已超沉默阈值 —— 这类 socket 的 onDone/onError 不会
+  /// 触发,既有 shouldReconnectOnResume 漏判)。给短暂宽限让冻结期间缓冲的入站帧
+  /// 先排空刷新 _lastReceivedAt,避免误判一个仍在正常生成中的连接。
+  void _onAppResumed() {
+    Future.delayed(const Duration(milliseconds: 800), _probeResumeLiveness);
+  }
+
+  void _probeResumeLiveness() {
+    final client = _client;
+    if (_usingWs &&
+        client is AstrBotWsClient &&
+        state2IsConnected &&
+        client.isStale) {
+      // 僵尸连接:强制重连(复用既有 teardown+重连路径,会落盘孤儿流式文本并按
+      // 既有退避重连,同 session_id 保留上下文)。
+      client.forceReconnect();
+      _markBackgroundDisconnect();
+    } else if (shouldReconnectOnResume(
+        current: AppLifecycleState.resumed, isConnected: state2IsConnected)) {
       connect();
+    }
+  }
+
+  /// 标记「后台期间连接被掐」——供 UI 在荣耀/华为等机型上重弹白名单引导。
+  void _markBackgroundDisconnect() {
+    if (!state.backgroundDisconnect) {
+      state = state.copyWith(backgroundDisconnect: true);
+    }
+  }
+
+  /// UI 展示完白名单引导后清除该标志。
+  void clearBackgroundDisconnect() {
+    if (state.backgroundDisconnect) {
+      state = state.copyWith(backgroundDisconnect: false);
     }
   }
 
@@ -296,10 +337,15 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
             : (s == ConnState.connected ? null : state.errorMessage);
         state = state.copyWith(connectionState: s as ConnState, errorMessage: err);
         if (s == ConnState.connected && _pendingQueue.isNotEmpty) {
+          // 检查每次发送结果:死 socket 上 sendMessage 返回 false(且已触发治愈重连),
+          // 把这些消息保留在队列,等下次重连后重发,不静默丢失。
+          final failed = <List<Map<String, dynamic>>>[];
           for (final msg in _pendingQueue) {
-            _client!.sendMessage(msg);
+            final ok = _client!.sendMessage(msg) as bool;
+            if (!ok) failed.add(msg);
           }
           _pendingQueue.clear();
+          _pendingQueue.addAll(failed);
         }
       });
 

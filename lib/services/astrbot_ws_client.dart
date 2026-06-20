@@ -113,6 +113,20 @@ class AstrBotWsClient {
     _onDisconnected();
   }
 
+  /// 连接仍报告 `connected`,但已超过 [_silenceLimit] 无任何入站帧 —— 典型为
+  /// 进程被 OS 冻结后解冻的「僵尸」socket(冻结期间 onDone/onError 未触发,
+  /// 状态仍停在 connected)。供 provider 在回前台时据此强制重连。
+  /// 注意:健康生成期间入站数据持续刷新 _lastReceivedAt,不会误判为 stale。
+  bool get isStale =>
+      !_disposed &&
+      _channel != null &&
+      DateTime.now().difference(_lastReceivedAt) > _silenceLimit;
+
+  /// 立即强制重连(用于回前台检测到僵尸连接)。复用既有 teardown + 重连路径,
+  /// 该路径会发出 disconnected/reconnecting 状态,触发 provider 落盘孤儿流式文本
+  /// 并按既有退避重连(同 session_id,保留上下文)。
+  void forceReconnect() => _forceReconnect();
+
   void _onMessage(dynamic msg) {
     // Any inbound frame means the connection is alive — record it so the
     // health-check timer does not force a reconnect while the server is busy

@@ -13,6 +13,7 @@ class ConfigService {
   static const _kThemeMode = 'theme_mode';
   static const _kConnectionMode = 'connection_mode';
   static const _kAutoPlayVoice = 'auto_play_voice';
+  static const _kOemWhitelistHintShown = 'oem_whitelist_hint_shown';
   // Bumped when we need to run a one-time prefs migration. Currently: force
   // existing installs off the buggy WS default onto SSE.
   static const _kPrefsVersion = 'prefs_version';
@@ -47,6 +48,10 @@ class ConfigService {
   String get connectionMode => _prefs.getString(_kConnectionMode) ?? AppConfig.defaultConnectionMode;
 
   bool get autoPlayVoice => _prefs.getBool(_kAutoPlayVoice) ?? false;
+
+  bool get oemWhitelistHintShown => _prefs.getBool(_kOemWhitelistHintShown) ?? false;
+  Future<void> setOemWhitelistHintShown(bool v) async =>
+      _prefs.setBool(_kOemWhitelistHintShown, v);
 
   Future<void> setConnectionMode(String v) async => _prefs.setString(_kConnectionMode, v);
 
