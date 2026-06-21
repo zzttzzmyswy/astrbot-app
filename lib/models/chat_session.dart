@@ -7,6 +7,10 @@
 class ChatSession {
   final String id;
   final String? name;
+  /// 服务端经 LLM 自动生成的标题(取自 PlatformSession.display_name)。
+  /// 仅作展示回退:用户自定义 [name] 优先,其次本字段,最后派生 id 前 8 位。
+  /// 用户改名不会被它覆盖(合并时只写本字段、不动 [name])。
+  final String? serverName;
   final int createdAt;
   final int lastUsedAt;
 
@@ -15,6 +19,7 @@ class ChatSession {
     required this.createdAt,
     required this.lastUsedAt,
     this.name,
+    this.serverName,
   });
 
   /// 从服务端 session_id 派生的初始显示名(取前 8 位)。
@@ -25,12 +30,19 @@ class ChatSession {
     return head;
   }
 
-  /// 实际展示名:用户自定义优先,否则派生名。
-  String get displayName => name?.isNotEmpty == true ? name! : derivedName(id);
+  /// 实际展示名优先级:用户自定义 > 服务端自动标题 > 派生 id 前 8 位。
+  String get displayName {
+    final n = name;
+    if (n != null && n.isNotEmpty) return n;
+    final s = serverName;
+    if (s != null && s.isNotEmpty) return s;
+    return derivedName(id);
+  }
 
   Map<String, dynamic> toJson() => {
         'id': id,
         if (name != null) 'name': name,
+        if (serverName != null) 'serverName': serverName,
         'createdAt': createdAt,
         'lastUsedAt': lastUsedAt,
       };
@@ -38,6 +50,7 @@ class ChatSession {
   factory ChatSession.fromJson(Map<String, dynamic> json) => ChatSession(
         id: json['id'] as String,
         name: json['name'] as String?,
+        serverName: json['serverName'] as String?,
         createdAt: (json['createdAt'] as num).toInt(),
         lastUsedAt: (json['lastUsedAt'] as num).toInt(),
       );
@@ -45,12 +58,14 @@ class ChatSession {
   ChatSession copyWith({
     String? id,
     Object? name = _unset,
+    Object? serverName = _unset,
     int? createdAt,
     int? lastUsedAt,
   }) =>
       ChatSession(
         id: id ?? this.id,
         name: identical(name, _unset) ? this.name : name as String?,
+        serverName: identical(serverName, _unset) ? this.serverName : serverName as String?,
         createdAt: createdAt ?? this.createdAt,
         lastUsedAt: lastUsedAt ?? this.lastUsedAt,
       );

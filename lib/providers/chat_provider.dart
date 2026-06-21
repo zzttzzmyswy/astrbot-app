@@ -157,6 +157,9 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
   bool _usingWs = true;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   final List<List<Map<String, dynamic>>> _pendingQueue = [];
+  /// 首轮回合后延迟取标题的定时器(complete/end 触发;4s 后取,给服务端后台
+  /// 标题生成 LLM 留时间)。有标题后不再调度。
+  Timer? _titleRefreshTimer;
   int _historyOffset = 0;
   bool _hasMoreHistory = true;
   AudioPlaybackNotifier? _playback;
@@ -477,9 +480,55 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
           connect();
         }
       });
+
+      // 拉取服务端自动生成的会话标题(display_name),刷新抽屉/AppBar 展示。
+      // 与 webchat 一致:服务端在首轮对话后用 LLM 生成标题并存 display_name。
+      _fetchServerSessionTitles();
     } catch (e) {
       state = state.copyWith(errorMessage: '连接失败: $e');
     }
+  }
+
+  /// 拉取服务端会话标题(PlatformSession.display_name)并合并进本地注册表的
+  /// serverName(不覆盖用户自定义 name)。供 connect 末尾、抽屉打开、首轮回合后调用。
+  /// 失败静默(标题是展示增强,非关键路径)。
+  Future<void> _fetchServerSessionTitles() async {
+    if (_config.apiKey.isEmpty || _config.serverUrl.isEmpty) return;
+    try {
+      final base = _config.serverUrl.endsWith('/')
+          ? _config.serverUrl.substring(0, _config.serverUrl.length - 1)
+          : _config.serverUrl;
+      final uri = Uri.parse(
+          '$base/api/v1/chat/sessions?username=${Uri.encodeQueryComponent(_config.nickname)}&page=1&page_size=100');
+      final res = await http
+          .get(uri, headers: {'X-API-Key': _config.apiKey})
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return;
+      final json = jsonDecode(res.body) as Map<String, dynamic>;
+      final list = (json['data']?['sessions'] as List?) ?? [];
+      final map = <String, String?>{};
+      for (final s in list) {
+        if (s is Map) {
+          final id = s['session_id'] as String?;
+          if (id != null) map[id] = s['display_name'] as String?;
+        }
+      }
+      final changed = await _sessions.mergeServerTitles(map);
+      if (changed) _syncSessionState();
+    } catch (_) {
+      // 网络异常等:静默,下次 connect/抽屉打开再试。
+    }
+  }
+
+  /// 抽屉打开时由 UI 调用,刷新会话标题(服务端可能刚生成完)。
+  Future<void> refreshSessionTitles() => _fetchServerSessionTitles();
+
+  /// 一轮流式结束后:若当前会话尚无服务端标题,延迟取一次(complete 与 end
+  /// 可能都触发,故取消重排,最终只在最后一次后 4s 取一次)。有标题后不再调度。
+  void _scheduleTitleRefreshIfNeeded() {
+    if (_sessions.currentHasServerName) return;
+    _titleRefreshTimer?.cancel();
+    _titleRefreshTimer = Timer(const Duration(seconds: 4), _fetchServerSessionTitles);
   }
 
   void sendText(String text) {
@@ -826,6 +875,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
             toolResults: [],
           );
         }
+        _scheduleTitleRefreshIfNeeded();
         break;
 
       case 'end':
@@ -846,6 +896,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
             toolResults: [],
           );
         }
+        _scheduleTitleRefreshIfNeeded();
         break;
 
       case 'error':
@@ -887,6 +938,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     WidgetsBinding.instance.removeObserver(this);
     _eventSub?.cancel();
     _connectivitySub?.cancel();
+    _titleRefreshTimer?.cancel();
     _client?.dispose();
     super.dispose();
   }

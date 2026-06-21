@@ -45,6 +45,30 @@ void main() {
     test('derivedName 短 id 原样返回', () {
       expect(ChatSession.derivedName('ab'), 'ab');
     });
+
+    test('displayName 优先级:name > serverName > 派生', () {
+      const base = ChatSession(id: 'abcdefgh1234', createdAt: 0, lastUsedAt: 0);
+      expect(base.displayName, 'abcdefgh'); // 无 name/serverName → 派生
+      expect(
+          const ChatSession(id: 'abcdefgh1234', createdAt: 0, lastUsedAt: 0, serverName: '服务端标题')
+              .displayName,
+          '服务端标题');
+      expect(
+          const ChatSession(id: 'abcdefgh1234', createdAt: 0, lastUsedAt: 0, serverName: '服务端标题', name: '我的')
+              .displayName,
+          '我的'); // 用户改名压过服务端标题
+    });
+
+    test('serverName serde 往返', () {
+      final s = const ChatSession(id: 'x', createdAt: 1, lastUsedAt: 2, serverName: '标题');
+      final back = ChatSession.fromJson(s.toJson());
+      expect(back.serverName, '标题');
+      // 旧注册表条目(无 serverName)能正常解析为 null
+      final legacy = ChatSession.fromJson({
+        'id': 'y', 'createdAt': 1, 'lastUsedAt': 2,
+      });
+      expect(legacy.serverName, isNull);
+    });
   });
 
   group('SessionStore load/seed', () {
@@ -208,6 +232,62 @@ void main() {
       await s.touchCurrent(nowMs: 999);
       expect(s.sessions, isEmpty);
       expect(s.currentId, kPendingSessionId);
+    });
+  });
+
+  group('SessionStore mergeServerTitles', () {
+    test('写入 serverName,不覆盖用户 name', () async {
+      final s = await _fresh();
+      await s.registerServerSession('a', nowMs: 10);
+      await s.rename('a', '我的会话');
+      final changed = await s.mergeServerTitles({'a': '服务端自动标题'});
+      expect(changed, true);
+      final a = s.sessions.firstWhere((e) => e.id == 'a');
+      expect(a.serverName, '服务端自动标题');
+      expect(a.name, '我的会话'); // 用户改名保留
+      expect(a.displayName, '我的会话'); // name 优先
+    });
+
+    test('无 name 时 displayName 回退到 serverName', () async {
+      final s = await _fresh();
+      await s.registerServerSession('a', nowMs: 10);
+      await s.mergeServerTitles({'a': '聊聊天气'});
+      expect(s.sessions.firstWhere((e) => e.id == 'a').displayName, '聊聊天气');
+    });
+
+    test('空/空白 display_name 视作 null(标题未生成)', () async {
+      final s = await _fresh();
+      await s.registerServerSession('a', nowMs: 10);
+      await s.mergeServerTitles({'a': '   '});
+      expect(s.sessions.first.serverName, isNull);
+      expect(s.sessions.first.displayName, ChatSession.derivedName('a'));
+    });
+
+    test('未变化的合并返回 false(避免无谓 state 刷新)', () async {
+      final s = await _fresh();
+      await s.registerServerSession('a', nowMs: 10);
+      await s.mergeServerTitles({'a': '标题'});
+      expect(await s.mergeServerTitles({'a': '标题'}), false);
+    });
+
+    test('仅更新命中 id,忽略未知 id', () async {
+      final s = await _fresh();
+      await s.registerServerSession('a', nowMs: 10);
+      await s.registerServerSession('b', nowMs: 20);
+      final changed = await s.mergeServerTitles({'a': 'A标题', 'zzz': '未知'});
+      expect(changed, true);
+      expect(s.sessions.firstWhere((e) => e.id == 'a').serverName, 'A标题');
+      expect(s.sessions.firstWhere((e) => e.id == 'b').serverName, isNull);
+    });
+
+    test('currentHasServerName 反映当前会话是否有标题', () async {
+      final s = await _fresh();
+      await s.registerServerSession('a', nowMs: 10);
+      expect(s.currentHasServerName, false);
+      await s.mergeServerTitles({'a': '标题'});
+      expect(s.currentHasServerName, true);
+      await s.beginNew();
+      expect(s.currentHasServerName, false); // 占位会话无标题
     });
   });
 }

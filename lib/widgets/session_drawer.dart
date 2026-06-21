@@ -11,11 +11,23 @@ import '../models/chat_session.dart';
 import '../providers/chat_provider.dart';
 import '../services/session_store.dart';
 
-class SessionDrawer extends ConsumerWidget {
+class SessionDrawer extends ConsumerStatefulWidget {
   const SessionDrawer({super.key});
+  @override
+  ConsumerState<SessionDrawer> createState() => _SessionDrawerState();
+}
+
+class _SessionDrawerState extends ConsumerState<SessionDrawer> {
+  @override
+  void initState() {
+    super.initState();
+    // 抽屉打开即刷新服务端标题(首轮对话后服务端可能刚生成完)。
+    Future.microtask(
+        () => ref.read(chatProvider.notifier).refreshSessionTitles());
+  }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final state = ref.watch(chatProvider);
     final isDark = Theme.of(context).brightness == Brightness.dark;
     const accent = Color(0xFF5B4BD6);

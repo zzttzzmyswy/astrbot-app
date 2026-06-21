@@ -194,6 +194,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           n.connectionState != _lastConn ||
           n.errorMessage != _state.errorMessage ||
           n.autoPlayVoice != _state.autoPlayVoice ||
+          n.currentSessionName != _state.currentSessionName ||
           streamingToggled ||
           !identical(n.messages, _lastMessages);
 

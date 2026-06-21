@@ -201,6 +201,41 @@ class SessionStore {
     await _persist();
   }
 
+  /// 合并服务端自动生成的标题([idToServerName],取自 GET /api/v1/chat/sessions
+  /// 的 display_name)。**只写 serverName,绝不覆盖用户自定义 [name]**。
+  /// 返回是否有变化(调用方据此决定是否同步 state)。
+  Future<bool> mergeServerTitles(Map<String, String?> idToServerName) async {
+    _ensureLoaded();
+    if (idToServerName.isEmpty) return false;
+    bool changed = false;
+    final list = [..._sessions];
+    for (int i = 0; i < list.length; i++) {
+      final s = list[i];
+      if (!idToServerName.containsKey(s.id)) continue;
+      final incoming = idToServerName[s.id];
+      final cleaned = (incoming == null || incoming.trim().isEmpty) ? null : incoming.trim();
+      if (s.serverName != cleaned) {
+        list[i] = s.copyWith(serverName: cleaned);
+        changed = true;
+      }
+    }
+    if (changed) {
+      _sessions = list;
+      await _persist();
+    }
+    return changed;
+  }
+
+  /// 当前会话是否已有服务端自动标题(用于决定首轮回合后是否还需去取)。
+  bool get currentHasServerName {
+    _ensureLoaded();
+    if (_currentId == null || _currentId == kPendingSessionId) return false;
+    final idx = _sessions.indexWhere((s) => s.id == _currentId);
+    if (idx < 0) return false;
+    final sn = _sessions[idx].serverName;
+    return sn != null && sn.isNotEmpty;
+  }
+
   Future<void> _persist() async {
     final arr = _sessions.map((s) => s.toJson()).toList();
     await _storage.writeString(_kSessionsKey, jsonEncode(arr));
