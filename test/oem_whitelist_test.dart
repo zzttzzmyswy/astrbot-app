@@ -52,6 +52,32 @@ void main() {
     });
   });
 
+  group('whitelistGuideFor — 描述品牌中立', () {
+    // 引导文案不点名具体厂商(荣耀/华为/小米/OPPO/vivo 等),统一用「某些机型」。
+    const _brandWords = [
+      '荣耀', '华为', '小米', 'OPPO', 'OnePlus', 'Realme', 'vivo', 'iQOO',
+      'MIUI', 'HyperOS', 'ColorOS', 'OriginOS', 'Funtouch', 'PowerGenie',
+    ];
+    for (final info in [
+      _info(m: 'HONOR'),
+      _info(m: 'HUAWEI'),
+      _info(p: true),
+      _info(m: 'Xiaomi'),
+      _info(m: 'OPPO'),
+      _info(m: 'vivo'),
+    ]) {
+      test('reason 不含品牌名 (${info.manufacturer}/${info.brand}/pg=${info.hasPowerGenie})', () {
+        final g = whitelistGuideFor(info);
+        expect(g.needsGuide, true);
+        expect(g.reason, contains('某些机型'));
+        for (final w in _brandWords) {
+          expect(g.reason, isNot(contains(w)),
+              reason: 'reason 不应点名品牌「$w」');
+        }
+      });
+    }
+  });
+
   group('OemInfo', () {
     test('isValid', () {
       expect(const OemInfo(manufacturer: '', brand: '').isValid, false);

@@ -52,6 +52,12 @@ class OemWhitelistGuide {
   );
 }
 
+/// 通用引导文案(品牌中立):不点名具体厂商,只说「某些机型」。
+const _kOemReason =
+    '某些机型默认会冻结或杀死后台应用,即使有保活服务也无效 —— '
+    '这是「bot 回复时切后台就断连、消息丢失」的根因。'
+    '请按下方步骤允许本应用后台运行。';
+
 /// 判定给定厂商是否需要后台白名单引导,并返回对应文案。
 /// [manufacturer]/[brand] 大小写不敏感(内部归一化)。
 /// [hasPowerGenie] 荣耀/华为 PowerGenie 是否安装 —— 该包只在荣耀/华为设备存在,
@@ -68,10 +74,7 @@ OemWhitelistGuide whitelistGuideFor(OemInfo info) {
       needsGuide: true,
       oemKey: 'honor_huawei',
       title: '开启后台运行,避免消息丢失',
-      reason:
-          '该机型(荣耀/华为)默认会冻结或杀死后台应用,即使有保活服务也无效 —— '
-          '这正是「bot 回复时切后台就断连、消息丢失」的根因。'
-          '请在「应用启动管理」中手动允许本应用后台运行(三开关全开)。',
+      reason: _kOemReason,
       steps: [
         '进入「设置 → 电池」',
         '点「应用启动管理」',
@@ -86,9 +89,7 @@ OemWhitelistGuide whitelistGuideFor(OemInfo info) {
       needsGuide: true,
       oemKey: 'xiaomi',
       title: '开启后台运行,避免消息丢失',
-      reason:
-          '小米 MIUI/HyperOS 默认会限制后台应用联网与省电,导致切后台断连、消息丢失。'
-          '请允许本应用无限制后台运行与自启动。',
+      reason: _kOemReason,
       steps: [
         '长按「Bot助手」图标 → 应用信息',
         '「省电策略」选「无限制」',
@@ -104,9 +105,7 @@ OemWhitelistGuide whitelistGuideFor(OemInfo info) {
       needsGuide: true,
       oemKey: 'oppo',
       title: '开启后台运行,避免消息丢失',
-      reason:
-          'OPPO/OnePlus/Realme(ColorOS)默认会冻结后台应用,导致切后台断连、消息丢失。'
-          '请允许本应用后台运行与自启动。',
+      reason: _kOemReason,
       steps: [
         '进入「设置 → 电池 → 更多(电池)设置 → 应用耗电管理」',
         '找到「Bot助手」,开启「允许后台运行」与「允许自启动」',
@@ -119,9 +118,7 @@ OemWhitelistGuide whitelistGuideFor(OemInfo info) {
       needsGuide: true,
       oemKey: 'vivo',
       title: '开启后台运行,避免消息丢失',
-      reason:
-          'vivo(OriginOS/Funtouch)默认会冻结后台应用,导致切后台断连、消息丢失。'
-          '请允许本应用后台高耗电运行。',
+      reason: _kOemReason,
       steps: [
         '进入「设置 → 电池 → 后台耗电管理」',
         '找到「Bot助手」,允许「后台高耗电」',
