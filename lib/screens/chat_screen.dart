@@ -17,11 +17,8 @@ import '../services/foreground_service.dart';
 import '../models/chat_event.dart';
 import '../models/message.dart';
 import '../widgets/attachment_panel.dart';
-import '../widgets/oem_whitelist_dialog.dart';
 import '../widgets/session_drawer.dart';
 import '../util/lru_cache.dart';
-import '../util/oem_whitelist.dart';
-import '../services/device_oem_service.dart';
 import 'settings_screen.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
@@ -76,10 +73,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   // spinner) once older history is exhausted. Reset when the list reloads.
   bool _noMoreHistory = false;
   bool _firstLoad = true;
-  // 后台白名单引导(荣耀/华为等机型):_oemGuide 在 initState 异步拉取;
-  // 首次启动按 config 标志展示一次,后台断连时本会话再弹一次。
-  OemWhitelistGuide? _oemGuide;
-  bool _oemHintShownThisSession = false;
   // 流式输出"在场"标志:仅当 streamingText 在 null↔非null 之间翻转时才
   // 重建整树(增删尾部流式 sliver 项);流式内容逐字变化只由尾部 Consumer
   // 订阅 select((s)=>s.streamingText) 单独重建,不重建历史列表。
@@ -122,30 +115,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       // persists and messages are not lost.
       startKeepAliveService();
     });
-    // 检测厂商,首次启动在荣耀/华为等机型展示一次后台白名单引导。
-    _loadOemGuide();
-  }
-
-  Future<void> _loadOemGuide() async {
-    final info = await const DeviceOemService().getInfo();
-    if (!mounted) return;
-    final guide = whitelistGuideFor(info);
-    if (!guide.needsGuide) return;
-    _oemGuide = guide;
-    final config = ref.read(configServiceProvider);
-    if (!config.oemWhitelistHintShown) {
-      await config.setOemWhitelistHintShown(true);
-      if (!mounted) return;
-      _showOemWhitelistDialog(guide);
-    }
-  }
-
-  void _showOemWhitelistDialog(OemWhitelistGuide guide) {
-    if (!mounted) return;
-    showDialog<void>(
-      context: context,
-      builder: (_) => OemWhitelistDialog(guide: guide),
-    );
   }
 
   @override
@@ -176,15 +145,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       _streamingActive = s.streamingText != null;
     }
     ref.listen(chatProvider, (_, n) {
-      // 后台期间连接被掐:在荣耀/华为等机型上本会话再弹一次白名单引导(每会话一次,避免骚扰)。
-      if (n.backgroundDisconnect &&
-          _oemGuide != null &&
-          _oemGuide!.needsGuide &&
-          !_oemHintShownThisSession) {
-        _oemHintShownThisSession = true;
-        _showOemWhitelistDialog(_oemGuide!);
-        ref.read(chatProvider.notifier).clearBackgroundDisconnect();
-      }
       // 流式内容逐字变化(n.streamingText)不走 setState,交给尾部 Consumer
       // 自行重建;此处只在结构/状态变化或流式"在场"翻转时重建整树。
       final streamingToggled = (n.streamingText != null) != _streamingActive;

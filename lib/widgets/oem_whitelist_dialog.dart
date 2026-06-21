@@ -56,7 +56,7 @@ class _OemWhitelistDialogState extends State<OemWhitelistDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context, false),
-          child: const Text('稍后再说'),
+          child: const Text('关闭'),
         ),
         FilledButton.icon(
           icon: const Icon(Icons.settings, size: 18),

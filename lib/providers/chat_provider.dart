@@ -98,7 +98,6 @@ class ChatState {
   final List<ToolCall> toolCalls;
   final List<ToolResult> toolResults;
   final bool autoPlayVoice;
-  final bool backgroundDisconnect;
   // 多会话:注册表 + 当前会话 id(kPendingSessionId 表示尚未由服务端分配的新会话)
   // + 当前会话展示名(用户自定义或由服务端 session_id 派生;占位为「新会话」)。
   final List<ChatSession> sessions;
@@ -113,7 +112,6 @@ class ChatState {
     this.toolCalls = const [],
     this.toolResults = const [],
     this.autoPlayVoice = false,
-    this.backgroundDisconnect = false,
     this.sessions = const [],
     this.currentSessionId = kPendingSessionId,
     this.currentSessionName = '新会话',
@@ -127,7 +125,6 @@ class ChatState {
     List<ToolCall>? toolCalls,
     List<ToolResult>? toolResults,
     bool? autoPlayVoice,
-    bool? backgroundDisconnect,
     List<ChatSession>? sessions,
     String? currentSessionId,
     String? currentSessionName,
@@ -140,7 +137,6 @@ class ChatState {
         toolCalls: toolCalls ?? this.toolCalls,
         toolResults: toolResults ?? this.toolResults,
         autoPlayVoice: autoPlayVoice ?? this.autoPlayVoice,
-        backgroundDisconnect: backgroundDisconnect ?? this.backgroundDisconnect,
         sessions: sessions ?? this.sessions,
         currentSessionId: currentSessionId ?? this.currentSessionId,
         currentSessionName: currentSessionName ?? this.currentSessionName,
@@ -197,24 +193,9 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       // 僵尸连接:强制重连(复用既有 teardown+重连路径,会落盘孤儿流式文本并按
       // 既有退避重连,同 session_id 保留上下文)。
       client.forceReconnect();
-      _markBackgroundDisconnect();
     } else if (shouldReconnectOnResume(
         current: AppLifecycleState.resumed, isConnected: state2IsConnected)) {
       connect();
-    }
-  }
-
-  /// 标记「后台期间连接被掐」——供 UI 在荣耀/华为等机型上重弹白名单引导。
-  void _markBackgroundDisconnect() {
-    if (!state.backgroundDisconnect) {
-      state = state.copyWith(backgroundDisconnect: true);
-    }
-  }
-
-  /// UI 展示完白名单引导后清除该标志。
-  void clearBackgroundDisconnect() {
-    if (state.backgroundDisconnect) {
-      state = state.copyWith(backgroundDisconnect: false);
     }
   }
 

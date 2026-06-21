@@ -10,7 +10,10 @@ import '../providers/chat_provider.dart';
 import '../services/cache_service.dart';
 import '../services/update_service.dart';
 import '../services/apk_installer.dart';
+import '../services/device_oem_service.dart';
 import '../util/key_mask.dart';
+import '../util/oem_whitelist.dart';
+import '../widgets/oem_whitelist_dialog.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -23,6 +26,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late ConfigService _config;
   String _cacheSize = '计算中...';
   String _currentVersion = '';
+  // 后台运行引导(荣耀/华为等国产机型)。检测到需要时在设置页展示一个入口,
+  // 点击弹出步骤引导(不再在启动/后台断连时自动弹窗打扰用户)。
+  OemWhitelistGuide? _oemGuide;
 
   @override
   void initState() {
@@ -32,6 +38,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     UpdateService().currentVersion().then((v) {
       if (mounted) setState(() => _currentVersion = v);
     });
+    _loadOemGuide();
+  }
+
+  Future<void> _loadOemGuide() async {
+    final info = await const DeviceOemService().getInfo();
+    if (!mounted) return;
+    final guide = whitelistGuideFor(info);
+    if (guide.needsGuide) {
+      setState(() => _oemGuide = guide);
+    }
+  }
+
+  void _showOemGuide() {
+    final guide = _oemGuide;
+    if (guide == null || !guide.needsGuide) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => OemWhitelistDialog(guide: guide),
+    );
   }
 
   Future<void> _calcCacheSize() async {
@@ -121,8 +146,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     : 'WebSocket'),
                 const SizedBox(height: 2),
                 const Text(
-                  'SSE 仅在请求-响应期间收发;需要后台实时接收 bot 推送请用 WebSocket',
-                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                  'SSE:仅前台(本 app 聚焦时)接收消息。\n'
+                  'WS:可后台接收,但网络波动断连可能致 AstrBot 当前会话卡死、'
+                  '无法再收消息,届时需重启 AstrBot。',
+                  style: TextStyle(fontSize: 11, color: Colors.grey, height: 1.35),
                 ),
               ],
             ),
@@ -143,6 +170,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               },
             ),
           ),
+          if (_oemGuide != null && _oemGuide!.needsGuide)
+            ListTile(
+              leading: Icon(Icons.bolt_rounded,
+                  color: Theme.of(context).colorScheme.primary, size: 22),
+              title: const Text('后台运行设置'),
+              subtitle: Text(_oemGuide!.reason, maxLines: 2, overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, height: 1.3)),
+              trailing: const Icon(Icons.chevron_right_rounded, size: 20),
+              onTap: _showOemGuide,
+            ),
           const Divider(),
           ListTile(
             title: const Text('清理缓存'),
