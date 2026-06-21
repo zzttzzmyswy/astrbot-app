@@ -8,12 +8,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import '../models/chat_event.dart';
 import '../models/message.dart';
+import '../models/chat_session.dart';
 import '../services/astrbot_sse_client.dart';
 import '../services/astrbot_ws_client.dart';
 import '../services/audio_playback_service.dart';
 import '../services/cache_service.dart';
 import '../services/config_service.dart';
 import '../services/file_service.dart';
+import '../services/prefs_storage.dart';
+import '../services/session_store.dart';
 import '../util/lifecycle_reconnect.dart';
 import '../util/outbound.dart';
 import 'config_provider.dart';
@@ -96,6 +99,11 @@ class ChatState {
   final List<ToolResult> toolResults;
   final bool autoPlayVoice;
   final bool backgroundDisconnect;
+  // 多会话:注册表 + 当前会话 id(kPendingSessionId 表示尚未由服务端分配的新会话)
+  // + 当前会话展示名(用户自定义或由服务端 session_id 派生;占位为「新会话」)。
+  final List<ChatSession> sessions;
+  final String currentSessionId;
+  final String currentSessionName;
 
   const ChatState({
     this.messages = const [],
@@ -106,6 +114,9 @@ class ChatState {
     this.toolResults = const [],
     this.autoPlayVoice = false,
     this.backgroundDisconnect = false,
+    this.sessions = const [],
+    this.currentSessionId = kPendingSessionId,
+    this.currentSessionName = '新会话',
   });
 
   ChatState copyWith({
@@ -117,6 +128,9 @@ class ChatState {
     List<ToolResult>? toolResults,
     bool? autoPlayVoice,
     bool? backgroundDisconnect,
+    List<ChatSession>? sessions,
+    String? currentSessionId,
+    String? currentSessionName,
   }) =>
       ChatState(
         messages: messages ?? this.messages,
@@ -127,12 +141,17 @@ class ChatState {
         toolResults: toolResults ?? this.toolResults,
         autoPlayVoice: autoPlayVoice ?? this.autoPlayVoice,
         backgroundDisconnect: backgroundDisconnect ?? this.backgroundDisconnect,
+        sessions: sessions ?? this.sessions,
+        currentSessionId: currentSessionId ?? this.currentSessionId,
+        currentSessionName: currentSessionName ?? this.currentSessionName,
       );
 }
 
 class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver {
   final ConfigService _config;
   final CacheService _cache = CacheService();
+  final SessionStore _sessions;
+  bool _sessionsLoaded = false;
   dynamic _client;
   StreamSubscription<ChatEvent>? _eventSub;
   bool _usingWs = true;
@@ -146,7 +165,9 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
   /// 靠这个把失败关联回具体消息。收到该消息的首个流式事件/complete/end 即清空。
   int? _inflightTextCreatedAt;
 
-  ChatNotifier(this._config) : super(ChatState(autoPlayVoice: _config.autoPlayVoice)) {
+  ChatNotifier(this._config)
+      : _sessions = SessionStore(PrefsSessionStorage(_config.prefs)),
+        super(ChatState(autoPlayVoice: _config.autoPlayVoice)) {
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -208,6 +229,99 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
   }
 
   String? _resolvedConfigId;
+
+  /// 首启加载会话注册表:若为空且存在旧的单会话 session_id,种一条会话(把现有
+  /// 单会话平滑升级为「会话 #1」);并把缓存中 session_id 为 NULL 的存量行回填
+  /// 到当前会话,避免历史消息丢失。
+  Future<void> _ensureSessionsLoaded() async {
+    if (_sessionsLoaded) return;
+    await _sessions.load();
+    final wasEmptyBeforeSeed = _sessions.sessions.isEmpty;
+    await _sessions.seedFromLegacy(legacySessionId: _config.sessionId);
+    if (wasEmptyBeforeSeed && _config.sessionId != null && _config.sessionId!.isNotEmpty) {
+      // 种子种到 _config.sessionId;把存量消息回填到该会话。
+      await _cache.backfillSession(_config.sessionId!);
+    }
+    _sessionsLoaded = true;
+  }
+
+  /// 把注册表状态(sessions 列表 / 当前 id / 当前展示名)同步进 ChatState。
+  /// 传入 [messages] 时同时替换消息列表(connect 加载历史或切会话时用)。
+  void _syncSessionState({List<LocalMessage>? messages}) {
+    final cur = _sessions.currentId;
+    String name;
+    if (cur == kPendingSessionId) {
+      name = '新会话';
+    } else {
+      final match = _sessions.sessions
+          .where((s) => s.id == cur)
+          .toList(growable: false);
+      name = match.isEmpty ? ChatSession.derivedName(cur) : match.first.displayName;
+    }
+    state = state.copyWith(
+      sessions: _sessions.sessions,
+      currentSessionId: cur,
+      currentSessionName: name,
+      messages: messages ?? state.messages,
+    );
+  }
+
+  /// 当前会话用于缓存读写的 session_id(占位会话为 kPendingSessionId='')。
+  String get _cacheSessionId => _sessionsLoaded ? _sessions.currentId : kPendingSessionId;
+
+  /// 服务端回传 session_id(首条消息后)时:若当前是占位会话,注册为新会话
+  /// 并把此前插入的「无 session_id」在途消息认领到新会话。「聊天开始后从服务器
+  /// 获取初始名称」即此:session_id 由服务端分配,初始展示名由其派生(前 8 位)。
+  Future<void> _onServerSessionId(String sid) async {
+    final wasPending = _sessions.currentId == kPendingSessionId;
+    if (!wasPending && _sessions.currentId == sid) return; // 已是该会话,无需变动
+    await _sessions.registerServerSession(sid,
+        nowMs: DateTime.now().millisecondsSinceEpoch);
+    if (wasPending) {
+      // 认领首条消息发出后、服务端回传 id 之前插入的 in-flight 消息。
+      await _cache.adoptOrphans(sid);
+    }
+    _syncSessionState();
+  }
+
+  /// 新建会话:切到占位(服务端将在首条消息后分配 id)。返回 false 表示已达 25 上限。
+  Future<bool> createSession() async {
+    final ok = await _sessions.beginNew();
+    if (!ok) return false;
+    // 清掉上一个被放弃的占位会话残留('' 消息,服务端未及认领),保证新会话干净。
+    await _cache.clearSession(kPendingSessionId);
+    await connect(); // 重建客户端(占位 → 不发 session_id)+ 清空消息展示
+    return true;
+  }
+
+  /// 切换到指定会话:加载其本地历史 + 用该 id 重连(服务端加载该对话历史)。
+  Future<void> selectSession(String id) async {
+    // 离开占位会话:清掉其未发送的在途消息(服务端未及认领的 '' 行)。
+    if (_sessions.currentId == kPendingSessionId) {
+      await _cache.clearSession(kPendingSessionId);
+    }
+    final ok = await _sessions.select(id);
+    if (!ok) return;
+    await connect();
+  }
+
+  /// 改名(仅本地;服务端无 API-key rename 端点)。
+  Future<void> renameSession(String id, String? name) async {
+    final ok = await _sessions.rename(id, name);
+    if (!ok) return;
+    _syncSessionState();
+  }
+
+  /// 删除会话:移除注册表 + 删该会话本地消息。删的是当前会话则切到另一个(或占位)。
+  Future<void> deleteSession(String id) async {
+    final wasCurrent = _sessions.currentId == id;
+    await _sessions.delete(id, deleteMessages: (sid) => _cache.clearSession(sid));
+    if (wasCurrent) {
+      await connect(); // 切到下一个会话(或占位)
+    } else {
+      _syncSessionState(); // 仅刷新列表
+    }
+  }
 
   /// Resolve config name to UUID by querying /api/v1/configs.
   /// Returns null if resolution fails — caller must handle.
@@ -288,15 +402,18 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     try {
       // Clear previous errors
       state = state.copyWith(errorMessage: null);
-      // 加载全部本地历史(撤销旧版只取最新 10 条的限制)。列表交给 SliverList
-      // 懒渲染,首屏只构建可见项,故即便历史很长内存与渲染仍可控。
+      // 多会话:首启加载注册表 + 旧单会话种子 + 把存量消息回填到当前会话(仅一次)。
+      await _ensureSessionsLoaded();
+      final cur = _sessions.currentId; // 真实 id 或 kPendingSessionId(新会话占位)
+      // 镜像到 config:真实 id 写回(供 session_id 事件及旧路径读),占位写空串。
+      await _config.setSessionId(cur == kPendingSessionId ? '' : cur);
+      // 加载当前会话的本地历史(占位会话返回空)。列表交给 SliverList 懒渲染,
+      // 首屏只构建可见项,故即便历史很长内存与渲染仍可控。
       _historyOffset = 0;
-      final history = await _cache.getMessages();
+      final history = await _cache.getMessages(sessionId: cur);
       _historyOffset = history.length;
       _hasMoreHistory = false; // 已全量加载,无需向上分页
-      if (history.isNotEmpty) {
-        state = state.copyWith(messages: history);
-      }
+      _syncSessionState(messages: history);
 
       // Reset cache and resolve config name to UUID
       _resolvedConfigId = null;
@@ -306,6 +423,8 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       _client?.dispose();
       final mode = _config.connectionMode;
       _usingWs = mode == 'ws';
+      // 占位会话用 null(session_id 不发 → 服务端分配);真实会话用该 id(服务端加载该对话历史)。
+      final effectiveSid = cur == kPendingSessionId ? null : cur;
 
       if (_usingWs) {
         _client = AstrBotWsClient(
@@ -313,7 +432,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
           apiKey: _config.apiKey,
           username: _config.nickname,
           configId: resolvedId,
-          sessionId: _config.sessionId,
+          sessionId: effectiveSid,
         );
       } else {
         _client = AstrBotSseClient(
@@ -321,7 +440,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
           apiKey: _config.apiKey,
           username: _config.nickname,
           configId: resolvedId,
-          sessionId: _config.sessionId,
+          sessionId: effectiveSid,
         );
       }
 
@@ -379,7 +498,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       toolCalls: [],
       toolResults: [],
     );
-    _cache.insertMessage(localMsg);
+    _cache.insertMessage(localMsg, sessionId: _cacheSessionId);
     _dispatchText(createdAt: now, text: text, msgParts: msgParts);
   }
 
@@ -455,7 +574,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       createdAt: now,
     );
     state = state.copyWith(messages: [...state.messages, msg]);
-    _cache.upsert(msg);
+    _cache.upsert(msg, sessionId: _cacheSessionId);
     return now;
   }
 
@@ -482,7 +601,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
           uploadProgress: null,
         );
         state = state.copyWith(messages: msgs);
-        _cache.upsert(msgs[i]);
+        _cache.upsert(msgs[i], sessionId: _cacheSessionId);
         break;
       }
     }
@@ -501,7 +620,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       if (msgs[i].createdAt == createdAt && msgs[i].isFromMe) {
         msgs[i] = msgs[i].copyWith(status: MessageStatus.error, uploadProgress: null);
         state = state.copyWith(messages: msgs);
-        _cache.upsert(msgs[i]);
+        _cache.upsert(msgs[i], sessionId: _cacheSessionId);
         return;
       }
     }
@@ -555,7 +674,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       status: MessageStatus.sent,
       createdAt: now,
     );
-    _cache.upsertBotText(botMsg);
+    _cache.upsertBotText(botMsg, sessionId: _cacheSessionId);
     state = state.copyWith(
       messages: [...state.messages, botMsg],
       streamingText: null,
@@ -586,7 +705,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     switch (event.type) {
       case 'session_id':
         if (event.sessionId != null) {
-          _config.setSessionId(event.sessionId!);
+          _onServerSessionId(event.sessionId!); // fire-and-forget(与缓存写入一致)
         }
         break;
 
@@ -634,7 +753,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
               createdAt: now,
             );
             state = state.copyWith(messages: [...state.messages, botMsg]);
-            _cache.upsert(botMsg);
+            _cache.upsert(botMsg, sessionId: _cacheSessionId);
           }
         }
         break;
@@ -663,7 +782,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
             final already = msgs.any((m) => m.attachmentId == id);
             if (target >= 0) {
               msgs[target] = msgs[target].copyWith(attachmentId: id);
-              _cache.upsert(msgs[target]);
+              _cache.upsert(msgs[target], sessionId: _cacheSessionId);
             } else if (!already) {
               // 服务端未先发 raw 占位、直接发 saved 时新建。同 attachmentId
               // 已存在(重复投递)则跳过,避免同一条媒体二次入列。
@@ -672,7 +791,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
                 isFromMe: false, status: MessageStatus.sent, createdAt: now,
               );
               msgs.add(created);
-              _cache.upsert(created);
+              _cache.upsert(created, sessionId: _cacheSessionId);
             }
             // 自动播放:bot 语音拿到 attachmentId 后入队(开关开时)。
             if (!already &&
@@ -699,7 +818,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
           );
           // 按内容去重持久化:complete 与 end 可能各自触发(或重连重投递),
           // 二者 createdAt 不同毫秒,普通 upsert 撞不上,故用内容+时间窗去重。
-          _cache.upsertBotText(botMsg);
+          _cache.upsertBotText(botMsg, sessionId: _cacheSessionId);
           state = state.copyWith(
             messages: [...state.messages, botMsg],
             streamingText: null,
@@ -719,7 +838,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
             status: MessageStatus.sent,
             createdAt: now,
           );
-          _cache.upsertBotText(botMsg);
+          _cache.upsertBotText(botMsg, sessionId: _cacheSessionId);
           state = state.copyWith(
             messages: [...state.messages, botMsg],
             streamingText: null,
@@ -736,7 +855,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
           _inflightTextCreatedAt = null;
           final msgs = markOutboundError(state.messages, inflight);
           for (final m in msgs) {
-            if (m.createdAt == inflight && m.isFromMe) _cache.upsert(m);
+            if (m.createdAt == inflight && m.isFromMe) _cache.upsert(m, sessionId: _cacheSessionId);
           }
           state = state.copyWith(messages: msgs);
         }
@@ -749,7 +868,8 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
 
   Future<bool> loadMoreHistory() async {
     if (!_hasMoreHistory) return false;
-    final older = await _cache.getMessages(limit: 20, offset: _historyOffset);
+    final older = await _cache.getMessages(
+        sessionId: _cacheSessionId, limit: 20, offset: _historyOffset);
     if (older.isEmpty) {
       _hasMoreHistory = false;
       return false;

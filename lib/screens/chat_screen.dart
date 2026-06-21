@@ -18,6 +18,7 @@ import '../models/chat_event.dart';
 import '../models/message.dart';
 import '../widgets/attachment_panel.dart';
 import '../widgets/oem_whitelist_dialog.dart';
+import '../widgets/session_drawer.dart';
 import '../util/lru_cache.dart';
 import '../util/oem_whitelist.dart';
 import '../services/device_oem_service.dart';
@@ -243,9 +244,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     return Scaffold(
       resizeToAvoidBottomInset: true,
+      drawer: const SessionDrawer(),
       backgroundColor: isDark ? const Color(0xFF0F0F0F) : const Color(0xFFFAFAFB),
       appBar: _Bar(
         conn: conn, isDark: isDark, error: _state.errorMessage,
+        sessionName: _state.currentSessionName,
         streaming: _state.streamingText?.isNotEmpty == true,
         reconnecting: _state.connectionState == ConnState.reconnecting,
         autoPlay: _state.autoPlayVoice,
@@ -1425,9 +1428,11 @@ class _InlineState extends State<_Inline> {
 class _Bar extends StatelessWidget implements PreferredSizeWidget {
   final bool conn, isDark, streaming, autoPlay, reconnecting;
   final String? error;
+  final String sessionName;
   final VoidCallback onToggleAutoPlay;
   const _Bar({
     required this.conn, required this.isDark, this.error,
+    required this.sessionName,
     this.streaming = false, this.autoPlay = false, this.reconnecting = false,
     required this.onToggleAutoPlay,
   });
@@ -1443,19 +1448,31 @@ class _Bar extends StatelessWidget implements PreferredSizeWidget {
         ? const Color(0xFF34C759)
         : (reconnecting ? const Color(0xFFFF9500) : const Color(0xFFFF6B6B));
     return AppBar(
-      backgroundColor: bg, elevation: 0, titleSpacing: 16,
-      title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Bot助手', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: txt)),
-        // 流式输出时左上角显示「三个点逐个高亮」的打字动画
-        if (streaming)
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            _TypingDots(color: accent),
-            const SizedBox(width: 6),
-            Text('正在输入...', style: TextStyle(fontSize: 11, color: accent)),
-          ])
-        else
-          Text(statusText, style: TextStyle(fontSize: 11, color: statusColor)),
-      ]),
+      backgroundColor: bg, elevation: 0, titleSpacing: 0,
+      // 显式菜单按钮:打开左侧会话抽屉(左边缘右滑亦可)。用 Builder 拿到 Scaffold
+      // 下的 context,确保 openDrawer 指向本页 Scaffold(系统手势争抢边缘时的兜底入口)。
+      leading: Builder(builder: (c) => IconButton(
+        icon: const Icon(Icons.menu_rounded, size: 22),
+        onPressed: () => Scaffold.of(c).openDrawer(),
+        tooltip: '会话',
+      )),
+      title: Padding(
+        padding: const EdgeInsets.only(left: 4),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(sessionName,
+              maxLines: 1, overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: txt)),
+          // 流式输出时左上角显示「三个点逐个高亮」的打字动画
+          if (streaming)
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              _TypingDots(color: accent),
+              const SizedBox(width: 6),
+              Text('正在输入...', style: TextStyle(fontSize: 11, color: accent)),
+            ])
+          else
+            Text(statusText, style: TextStyle(fontSize: 11, color: statusColor)),
+        ]),
+      ),
       actions: [
         // 喇叭自动播放开关(默认关、持久化)。tint 色块保证浅/暗模式对比度。
         Padding(

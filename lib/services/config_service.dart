@@ -21,6 +21,9 @@ class ConfigService {
 
   late SharedPreferences _prefs;
 
+  /// 暴露底层 prefs,供会话注册表(SessionStore)复用同一存储实例。
+  SharedPreferences get prefs => _prefs;
+
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
     await _migrate();

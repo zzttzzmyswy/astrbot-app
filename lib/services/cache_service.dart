@@ -16,7 +16,7 @@ class CacheService {
     final path = '$dbPath/astrbot_messages.db';
     return openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE messages (
@@ -27,10 +27,12 @@ class CacheService {
             local_path TEXT,
             is_from_me INTEGER NOT NULL,
             status TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            session_id TEXT
           )
         ''');
         await _dedupMessages(db);
+        await _buildSessionIndex(db);
       },
       onUpgrade: (db, oldV, newV) async {
         if (oldV < 2) {
@@ -44,8 +46,41 @@ class CacheService {
           // 随历史加载一直显示。详见 _dedupMessages 的时间桶策略。
           await _dedupMessages(db);
         }
+        if (oldV < 5) {
+          // 多会话:消息按 session_id 分区。新增列并回填到当前会话(由 provider
+          // 在迁移后调用 backfillSession 把存量行归到当前/旧 session_id)。
+          await db.execute('ALTER TABLE messages ADD COLUMN session_id TEXT');
+          await _buildSessionIndex(db);
+        }
       },
     );
+  }
+
+  Future<void> _buildSessionIndex(Database db) async {
+    try {
+      await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)');
+    } catch (_) {
+      // 老库可能已存在该索引或列尚未就绪;忽略,查询仍可按 session_id 过滤。
+    }
+  }
+
+  /// 回填:把当前库中 session_id 为 NULL 的存量行归到指定 session_id。
+  /// 用于从单会话版本升级到多会话时,把历史消息绑定到当前会话。
+  Future<void> backfillSession(String sessionId) async {
+    final d = await db;
+    await d.rawUpdate(
+        'UPDATE messages SET session_id = ? WHERE session_id IS NULL',
+        [sessionId]);
+  }
+
+  /// 新会话首条消息:在服务端回传 session_id 之前插入的消息 session_id 为空,
+  /// 服务端回传后用本方法把它们「认领」到新会话 id。仅作用于 session_id 为空的行。
+  Future<void> adoptOrphans(String sessionId) async {
+    final d = await db;
+    await d.rawUpdate(
+        "UPDATE messages SET session_id = ? WHERE session_id IS NULL OR session_id = ''",
+        [sessionId]);
   }
 
   Future<void> _dedupMessages(Database db) async {
@@ -63,39 +98,46 @@ class CacheService {
     ''');
   }
 
-  Future<int> insertMessage(LocalMessage msg) async {
+  Future<int> insertMessage(LocalMessage msg, {String? sessionId}) async {
     final d = await db;
-    return d.insert('messages', msg.toMap());
+    return d.insert('messages', msg.toMap()..['session_id'] = sessionId);
   }
 
   /// 插入 bot 文本消息,若近 5 分钟内已存在相同内容(!is_from_me)则跳过。
   /// 防止 bot 文本回复被持久化两次(complete 与 end 双触发、或重连重投递时
-  /// 各用不同毫秒的 createdAt,普通 upsert 按 created_at 撞不上)。
+  /// 各用不同毫秒的 createdAt,普通 upsert 按 created_at 撞不上,故用内容+时间窗去重)。
   ///
   /// 用 transaction 包裹 query+insert:sqflite 在 plugin 层串行化事务,第二个
   /// 事务的 query 必在第一个 commit 后才执行,从而能查到对方刚插入的行并跳过,
   /// 消除并发双写竞态(_handleEvent 不 await 缓存写入导致的并发)。
-  Future<void> upsertBotText(LocalMessage msg) async {
+  Future<void> upsertBotText(LocalMessage msg, {String? sessionId}) async {
     final d = await db;
     await d.transaction((txn) async {
       final rows = await txn.query(
         'messages',
-        where: 'is_from_me = 0 AND content = ? AND created_at > ?',
-        whereArgs: [msg.content ?? '', msg.createdAt - 300000],
+        where:
+            'is_from_me = 0 AND content = ? AND created_at > ? AND session_id IS ?',
+        whereArgs: [
+          msg.content ?? '',
+          msg.createdAt - 300000,
+          sessionId,
+        ],
         limit: 1,
       );
       if (rows.isEmpty) {
-        await txn.insert('messages', msg.toMap());
+        await txn.insert('messages', msg.toMap()..['session_id'] = sessionId);
       }
     });
   }
 
   /// 是否已存在该 attachment_id 的消息。用于 attachment_saved 新建分支,
   /// 避免服务端未先发 raw 占位、只发 saved 时重复创建同一条媒体气泡。
-  Future<bool> hasAttachmentId(String id) async {
+  Future<bool> hasAttachmentId(String id, {String? sessionId}) async {
     final d = await db;
     final rows = await d.query('messages',
-        where: 'attachment_id = ?', whereArgs: [id], limit: 1);
+        where: 'attachment_id = ? AND session_id IS ?',
+        whereArgs: [id, sessionId],
+        limit: 1);
     return rows.isNotEmpty;
   }
 
@@ -108,27 +150,42 @@ class CacheService {
   /// _handleEvent 不 await 而并发),第二个事务的 query 必在第一个 commit 后
   /// 才执行 → 能查到对方刚插入的行 → 改为 UPDATE 同一行,而非再 INSERT 一行。
   /// 不加事务时两次 query 都赶在对方 insert 前完成、都判空、都 insert → 落两行。
-  Future<void> upsert(LocalMessage msg) async {
+  Future<void> upsert(LocalMessage msg, {String? sessionId}) async {
     final d = await db;
     await d.transaction((txn) async {
       final rows = await txn.query('messages',
-          where: 'created_at = ?', whereArgs: [msg.createdAt], limit: 1);
+          where: 'created_at = ? AND session_id IS ?',
+          whereArgs: [msg.createdAt, sessionId],
+          limit: 1);
       if (rows.isEmpty) {
-        await txn.insert('messages', msg.toMap());
+        await txn.insert('messages', msg.toMap()..['session_id'] = sessionId);
       } else {
-        await txn.update('messages', msg.toMap(),
+        await txn.update('messages', msg.toMap()..['session_id'] = sessionId,
             where: 'id = ?', whereArgs: [rows.first['id']]);
       }
     });
   }
 
-  /// 读取消息。[limit] 为 null 时加载全部(撤销旧版只取最新 10 条的限制);
-  /// 返回按时间正序(最早→最新),供 UI 直接渲染。
-  Future<List<LocalMessage>> getMessages({int? limit, int offset = 0}) async {
+  /// 读取指定会话的消息。[limit] 为 null 时加载全部;返回按时间正序(最早→最新)。
+  /// [sessionId] 为 null 时兼容旧调用(返回全部,不应在多会话路径使用)。
+  Future<List<LocalMessage>> getMessages(
+      {String? sessionId, int? limit, int offset = 0}) async {
     final d = await db;
-    final rows = await d.query('messages',
-        orderBy: 'created_at DESC', limit: limit, offset: offset);
+    final rows = sessionId == null
+        ? await d.query('messages', orderBy: 'created_at DESC', limit: limit, offset: offset)
+        : await d.query('messages',
+            where: 'session_id IS ?',
+            whereArgs: [sessionId],
+            orderBy: 'created_at DESC',
+            limit: limit,
+            offset: offset);
     return rows.map((r) => LocalMessage.fromMap(r)).toList().reversed.toList();
+  }
+
+  /// 删除指定会话的全部消息(删除会话时调用)。
+  Future<void> clearSession(String sessionId) async {
+    final d = await db;
+    await d.delete('messages', where: 'session_id = ?', whereArgs: [sessionId]);
   }
 
   Future<void> clearAll() async {

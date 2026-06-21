@@ -10,6 +10,7 @@ import '../providers/chat_provider.dart';
 import '../services/cache_service.dart';
 import '../services/update_service.dart';
 import '../services/apk_installer.dart';
+import '../util/key_mask.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -85,7 +86,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         children: [
           _buildTile('昵称', _config.nickname, (v) => _config.setNickname(v)),
           _buildTile('服务器地址', _config.serverUrl, (v) => _config.setServerUrl(v)),
-          _buildTile('API Key', _config.apiKey, (v) => _config.setApiKey(v), obscure: true),
+          _ApiKeyTile(config: _config, onChanged: () => setState(() {})),
           _buildTile('Config ID', _config.configId, (v) => _config.setConfigId(v)),
           const Divider(),
           Consumer(builder: (context, ref, _) {
@@ -195,6 +196,74 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           setState(() {});
         }
       },
+    );
+  }
+}
+
+/// API Key 专用 tile:默认只显示前 10 个字符(掩码),眼睛按钮切换明文/掩码;
+/// 点 tile 进编辑对话框(对话框内同样可切换显隐)。
+class _ApiKeyTile extends StatefulWidget {
+  final ConfigService config;
+  final VoidCallback onChanged;
+  const _ApiKeyTile({required this.config, required this.onChanged});
+  @override State<_ApiKeyTile> createState() => _ApiKeyTileState();
+}
+
+class _ApiKeyTileState extends State<_ApiKeyTile> {
+  bool _revealed = false;
+
+  Future<void> _edit() async {
+    final ctrl = TextEditingController(text: widget.config.apiKey);
+    bool dialogRevealed = false;
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setS) {
+          return AlertDialog(
+            title: const Text('修改 API Key'),
+            content: TextField(
+              controller: ctrl,
+              obscureText: !dialogRevealed,
+              decoration: InputDecoration(
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                suffixIcon: IconButton(
+                  icon: Icon(dialogRevealed ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+                      size: 20),
+                  onPressed: () => setS(() => dialogRevealed = !dialogRevealed),
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, ctrl.text),
+                child: const Text('保存'),
+              ),
+            ],
+          );
+        });
+      },
+    );
+    if (result != null && result.isNotEmpty) {
+      await widget.config.setApiKey(result);
+      widget.onChanged();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final key = widget.config.apiKey;
+    final shown = key.isEmpty ? '未设置' : (_revealed ? key : maskKey(key));
+    return ListTile(
+      title: const Text('API Key'),
+      subtitle: Text(shown, maxLines: 1, overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontFamily: key.isEmpty ? null : 'monospace')),
+      trailing: IconButton(
+        icon: Icon(_revealed ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 20),
+        tooltip: _revealed ? '隐藏' : '显示',
+        onPressed: () => setState(() => _revealed = !_revealed),
+      ),
+      onTap: _edit,
     );
   }
 }
