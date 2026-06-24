@@ -102,6 +102,12 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
   // SSE 在途：当前正在等服务端响应的「我发出」文本消息的 createdAt（用于失败关联）。
   int? _inflightTextCreatedAt;
 
+  // 定时对齐：周期性用 since=本地最大 server_id 轻量拉取，有新行就合并补齐，
+  // 兜底 SSE 静默丢消息。仅在前台运行（后台靠 SSE 实时 + 看门狗）。
+  Timer? _alignTimer;
+  static const Duration _alignInterval = Duration(seconds: 60);
+  bool _resumed = true;
+
   ChatNotifier(this._config)
       : _accounts = AccountStore(PrefsAccountStorage(_config.prefs)),
         super(ChatState(autoPlayVoice: _config.autoPlayVoice)) {
@@ -110,8 +116,8 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state != AppLifecycleState.resumed) return;
-    _onAppResumed();
+    _resumed = state == AppLifecycleState.resumed;
+    if (_resumed) _onAppResumed();
   }
 
   void _onAppResumed() {
@@ -142,6 +148,33 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       if (mounted) _syncAccountState(messages: refreshed);
     } catch (_) {
       // 网络异常等：静默，下次再试。
+    }
+  }
+
+  /// 启动定时对齐检查（前台 + 已连接时每 60s 一次）。
+  void _startAlignCheck() {
+    _alignTimer?.cancel();
+    _alignTimer = Timer.periodic(_alignInterval, (_) => _alignCheck());
+  }
+
+  /// 用 since=本地最大 server_id 轻量拉取：返回为空即已对齐；有新行则合并补齐。
+  /// 仅前台运行（后台靠 SSE 实时 + 看门狗，且进程冻结时 Timer 本就不触发）。
+  Future<void> _alignCheck() async {
+    if (!mounted || !_resumed) return;
+    if (state.connectionState != ConnState.connected) return;
+    final acc = _currentAccount;
+    final http = _http;
+    if (acc == null || http == null) return;
+    try {
+      final localMax = await _cache.maxServerId(acc.id);
+      final res = await http.fetchHistory(since: localMax, limit: 200);
+      if (res.messages.isEmpty) return; // 已对齐
+      await _cache.mergeHistory(res.messages, accountId: acc.id);
+      _client?.sinceCursor = await _cache.maxServerId(acc.id);
+      final refreshed = await _cache.getMessages(accountId: acc.id);
+      if (mounted) _syncAccountState(messages: refreshed);
+    } catch (_) {
+      // 静默：下次 tick 再试。
     }
   }
 
@@ -195,6 +228,8 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     _eventSub = null;
     _stateSub?.cancel();
     _stateSub = null;
+    _alignTimer?.cancel();
+    _alignTimer = null;
     await _client?.dispose();
     _client = null;
 
@@ -253,6 +288,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       });
       _eventSub = _client!.events.listen(_handleEvent);
       await _client!.connect(sinceCursor: cursor);
+      _startAlignCheck();
 
       _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
         if (!results.contains(ConnectivityResult.none) &&
@@ -662,6 +698,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     _eventSub?.cancel();
     _stateSub?.cancel();
     _connectivitySub?.cancel();
+    _alignTimer?.cancel();
     _client?.dispose();
     super.dispose();
   }
