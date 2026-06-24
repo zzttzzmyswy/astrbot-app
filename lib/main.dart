@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'services/config_service.dart';
-import 'services/file_service.dart';
+import 'services/botapi_http.dart';
 import 'services/foreground_service.dart';
 import 'config/app_config.dart';
 import 'screens/chat_screen.dart';
@@ -26,10 +26,7 @@ void main() async {
   // 非阻塞清理过期附件磁盘缓存(>7 天)。失败不影响启动。
   Future.microtask(() async {
     try {
-      final cleaner = ConfigService();
-      await cleaner.init();
-      await FileService(serverUrl: cleaner.serverUrl, apiKey: cleaner.apiKey)
-          .cleanOldCache();
+      await BotApiHttp.cleanOldCache();
     } catch (_) {}
   });
 }

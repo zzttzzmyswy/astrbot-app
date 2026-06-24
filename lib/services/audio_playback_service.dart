@@ -3,9 +3,7 @@ import 'dart:async';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/message.dart';
-import 'file_service.dart';
 import 'play_queue.dart';
-import '../providers/config_provider.dart';
 
 /// 稳定标识一条消息,供气泡与播放服务对应(气泡会重建,key 不变)。
 String messageKey(LocalMessage m) =>
@@ -51,10 +49,9 @@ class AudioPlaybackNotifier extends StateNotifier<PlaybackState> {
   final AudioPlayer _player = AudioPlayer();
   final PlayQueue _queue = PlayQueue();
   final Map<String, LocalMessage> _msgByKey = {};
-  final FileService _fileService;
   StreamSubscription? _posSub, _durSub, _stateSub, _completeSub;
 
-  AudioPlaybackNotifier(this._fileService) : super(const PlaybackState()) {
+  AudioPlaybackNotifier() : super(const PlaybackState()) {
     _posSub = _player.onPositionChanged.listen((p) {
       if (state.currentKey != null) state = state.copyWith(position: p);
     });
@@ -123,27 +120,12 @@ class AudioPlaybackNotifier extends StateNotifier<PlaybackState> {
   Future<void> _playKey(String key) async {
     final m = _msgByKey[key];
     if (m == null) return;
-    String? path = m.localPath;
+    // botapi: 音频在收到事件时已由 provider 下载到 localPath（单次有效 URL，无法重取）。
+    final path = m.localPath;
     state = state.copyWith(currentKey: key, loading: false, position: Duration.zero, duration: Duration.zero);
     if (path == null || path.isEmpty) {
-      final aid = m.attachmentId ?? '';
-      if (aid.isEmpty) {
-        _failCurrent();
-        return;
-      }
-      state = state.copyWith(loading: true);
-      try {
-        final file = await _fileService.downloadAttachment(aid);
-        path = file?.path;
-      } catch (_) {
-        path = null;
-      }
-      if (path == null || path.isEmpty) {
-        state = state.copyWith(loading: false);
-        _failCurrent();
-        return;
-      }
-      state = state.copyWith(loading: false);
+      _failCurrent();
+      return;
     }
     try {
       await _player.play(DeviceFileSource(path));
@@ -175,8 +157,5 @@ class AudioPlaybackNotifier extends StateNotifier<PlaybackState> {
 
 final audioPlaybackProvider =
     StateNotifierProvider<AudioPlaybackNotifier, PlaybackState>((ref) {
-  final config = ref.read(configServiceProvider);
-  return AudioPlaybackNotifier(
-    FileService(serverUrl: config.serverUrl, apiKey: config.apiKey),
-  );
+  return AudioPlaybackNotifier();
 });

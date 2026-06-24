@@ -1,7 +1,6 @@
 // test/account_store_test.dart
 import 'package:flutter_test/flutter_test.dart';
 import 'package:astrbot_app/services/account_store.dart';
-import 'package:astrbot_app/models/account.dart';
 
 class _Mem implements AccountStorage {
   final Map<String, String> _m = {};

@@ -9,7 +9,6 @@ import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import '../providers/audio_provider.dart';
 import '../providers/chat_provider.dart';
-import '../providers/config_provider.dart';
 import '../services/audio_playback_service.dart';
 import '../services/audio_service.dart';
 import '../services/foreground_service.dart';
