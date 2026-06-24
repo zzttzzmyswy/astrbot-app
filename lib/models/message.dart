@@ -7,14 +7,15 @@ const _uploadProgressUnset = _UploadProgressUnset();
 
 class LocalMessage {
   final int? id;
-  final String msgType; // 'text', 'voice', 'image', 'file'
+  final String msgType; // 'text', 'voice', 'image', 'file', 'thinking'
   final String? content;
   final String? attachmentId;
-  final String? localPath;   // local file path for sent images/voice
+  final String? localPath;   // local file path for sent images/voice / 下载后的媒体
   final bool isFromMe;
   final MessageStatus status;
   final double? uploadProgress; // 0.0..1.0 while uploading, null otherwise
   final int createdAt;
+  final int? serverId; // botapi 历史行 int id（用于去重；实时落库行为 null）
 
   const LocalMessage({
     this.id,
@@ -26,6 +27,7 @@ class LocalMessage {
     this.status = MessageStatus.pending,
     this.uploadProgress,
     required this.createdAt,
+    this.serverId,
   });
 
   Map<String, dynamic> toMap() => {
@@ -39,6 +41,7 @@ class LocalMessage {
     // upload_progress 是瞬态字段(仅上传中有意义),不持久化;
     // 且 DB schema 无此列,写入会导致 INSERT 抛错、消息存不进库。
     'created_at': createdAt,
+    if (serverId != null) 'server_id': serverId,
   };
 
   factory LocalMessage.fromMap(Map<String, dynamic> map) => LocalMessage(
@@ -57,17 +60,20 @@ class LocalMessage {
     }(),
     uploadProgress: (map['upload_progress'] as num?)?.toDouble(),
     createdAt: map['created_at'] as int,
+    serverId: (map['server_id'] as num?)?.toInt(),
   );
 
   LocalMessage copyWith({
     int? id, String? msgType, String? content, String? attachmentId,
     String? localPath, bool? isFromMe, MessageStatus? status, int? createdAt,
+    int? serverId,
     Object? uploadProgress = _uploadProgressUnset,
   }) => LocalMessage(
     id: id ?? this.id, msgType: msgType ?? this.msgType,
     content: content ?? this.content, attachmentId: attachmentId ?? this.attachmentId,
     localPath: localPath ?? this.localPath, isFromMe: isFromMe ?? this.isFromMe,
     status: status ?? this.status, createdAt: createdAt ?? this.createdAt,
+    serverId: serverId ?? this.serverId,
     uploadProgress: identical(uploadProgress, _uploadProgressUnset)
         ? this.uploadProgress
         : uploadProgress as double?,
