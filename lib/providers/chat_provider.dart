@@ -14,7 +14,6 @@ import '../services/audio_playback_service.dart';
 import '../services/cache_service.dart';
 import '../services/config_service.dart';
 import '../services/account_store.dart';
-import '../util/lifecycle_reconnect.dart';
 import 'config_provider.dart';
 
 final chatProvider = StateNotifierProvider<ChatNotifier, ChatState>((ref) {
@@ -116,14 +115,34 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
   }
 
   void _onAppResumed() {
-    Future.delayed(const Duration(milliseconds: 600), () {
+    Future.delayed(const Duration(milliseconds: 600), () async {
       if (!mounted) return;
-      if (shouldReconnectOnResume(
-          current: AppLifecycleState.resumed,
-          isConnected: state.connectionState == ConnState.connected)) {
+      if (state.connectionState == ConnState.connected) {
+        // 流仍连：但可能「假活」（OS 后台冻结期间 SSE 静默、onDone 未触发、
+        // 状态仍报 connected）。无条件合并一次历史，把冻结期间错过的文本捞回。
+        await _catchupHistory();
+      } else {
         connect();
       }
     });
+  }
+
+  /// 拉服务端历史并合并入库（按 server_id 去重），刷新展示，并更新 SSE 游标。
+  /// 不动 SSE 流本身。用于回前台补漏（流仍连但可能假活）。
+  Future<void> _catchupHistory() async {
+    final acc = _currentAccount;
+    final http = _http;
+    if (acc == null || http == null) return;
+    try {
+      final hist = await http.fetchHistory(since: 0);
+      await _cache.mergeHistory(hist.messages, accountId: acc.id);
+      final cursor = await _cache.maxServerId(acc.id);
+      _client?.sinceCursor = cursor; // 供下次 SSE 重连用更准的游标
+      final refreshed = await _cache.getMessages(accountId: acc.id);
+      if (mounted) _syncAccountState(messages: refreshed);
+    } catch (_) {
+      // 网络异常等：静默，下次再试。
+    }
   }
 
   void attachPlayback(AudioPlaybackNotifier p) => _playback = p;

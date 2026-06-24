@@ -19,6 +19,14 @@ class BotApiClient {
   http.Client? _httpClient;
   int? _sinceCursor; // 重连时复用上次游标
 
+  // 空闲看门狗：服务端每 30s 发 ping，故 90s 内无任何入站帧即可判定连接
+  // 已「静默僵尸」（OS 后台冻结等，onDone/onError 未触发、状态仍报 connected）。
+  // 届时强制关闭 http client 以打断流，触发既有重连路径（带 since 游标补漏）。
+  DateTime _lastReceivedAt = DateTime.now();
+  Timer? _idleWatchdog;
+  static const Duration _idleCheckInterval = Duration(seconds: 30);
+  static const Duration _idleLimit = Duration(seconds: 90);
+
   final _eventController = StreamController<BotApiEvent>.broadcast();
   final _stateController = StreamController<ConnState>.broadcast();
 
@@ -26,6 +34,11 @@ class BotApiClient {
   Stream<ConnState> get state => _stateController.stream;
 
   BotApiClient({required this.serverUrl, required this.token});
+
+  /// 更新 since 游标（provider 在合并历史后调用，供下次重连用更准的游标，减少冗余回放）。
+  set sinceCursor(int? c) {
+    if (c != null && c > 0) _sinceCursor = c;
+  }
 
   String get _base {
     var s = serverUrl.trim();
@@ -68,11 +81,44 @@ class BotApiClient {
         return;
       }
       _reconnect.reset();
+      _lastReceivedAt = DateTime.now();
       _setState(ConnState.connected);
+      _startIdleWatchdog();
       _parseStream(streamedResponse);
     } catch (e) {
       _scheduleReconnect();
     }
+  }
+
+  void _startIdleWatchdog() {
+    _idleWatchdog?.cancel();
+    _idleWatchdog = Timer.periodic(_idleCheckInterval, (_) {
+      if (_disposed) return;
+      // 仅在「已连接」且超过静默阈值时判定僵尸；重连/断开态由既有路径处理。
+      if (_lastState == ConnState.connected &&
+          DateTime.now().difference(_lastReceivedAt) > _idleLimit) {
+        debugPrint('[BotAPI] idle watchdog: stale > ${_idleLimit.inSeconds}s, force reconnect');
+        _forceReconnect();
+      }
+    });
+  }
+
+  /// 跟踪最近一次推入状态流的状态（供看门狗判定是否「已连接」）。
+  ConnState _lastState = ConnState.disconnected;
+
+  /// 强制重连：关闭 http client 打断 SSE 流，_parseStream 的 finally 会走既有重连。
+  void _forceReconnect() {
+    _idleWatchdog?.cancel();
+    try {
+      _httpClient?.close();
+    } catch (_) {}
+    // 关 client 后流会 end/throw；若未触发（极端），兜底直接排重连。
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (!_disposed && _lastState != ConnState.disconnected) {
+        _setState(ConnState.disconnected);
+        _scheduleReconnect();
+      }
+    });
   }
 
   void _parseStream(http.StreamedResponse resp) async {
@@ -82,6 +128,7 @@ class BotApiClient {
       final lines = resp.stream.transform(utf8.decoder).transform(const LineSplitter());
       await for (final line in lines) {
         if (_disposed) break;
+        _lastReceivedAt = DateTime.now(); // 任何入站帧（含 ping/空行）都视为连接活跃
         if (line.startsWith(':')) {
           // SSE 注释行，忽略
           continue;
@@ -110,6 +157,7 @@ class BotApiClient {
         }
       }
     } catch (_) {}
+    _idleWatchdog?.cancel();
     if (!_disposed) {
       _setState(ConnState.disconnected);
       _scheduleReconnect();
@@ -119,6 +167,7 @@ class BotApiClient {
   void _scheduleReconnect() {
     if (_disposed) return;
     _reconnectTimer?.cancel();
+    _idleWatchdog?.cancel();
     final delay = _reconnect.nextDelay(baseMs: 1000, maxMs: 30000);
     _setState(ConnState.reconnecting);
     _reconnect.recordFailure();
@@ -128,11 +177,15 @@ class BotApiClient {
     });
   }
 
-  void _setState(ConnState s) => _stateController.add(s);
+  void _setState(ConnState s) {
+    _lastState = s;
+    _stateController.add(s);
+  }
 
   Future<void> dispose() async {
     _disposed = true;
     _reconnectTimer?.cancel();
+    _idleWatchdog?.cancel();
     _httpClient?.close();
     await _eventController.close();
     await _stateController.close();
