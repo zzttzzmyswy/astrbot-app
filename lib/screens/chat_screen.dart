@@ -688,6 +688,7 @@ class _Bubble extends StatelessWidget {
         break;
       case 'voice':
       case 'record':
+      case 'audio':
         body = _VoiceBubble(m: m, fg: fg, isMe: isMe);
         break;
       case 'file':

@@ -31,8 +31,8 @@ android {
         applicationId = "top.zztweb.astrbot"
         minSdk = flutter.minSdkVersion
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.2.0"
+        versionCode = 13
+        versionName = "1.2.1"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
