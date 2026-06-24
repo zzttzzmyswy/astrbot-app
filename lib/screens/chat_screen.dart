@@ -12,12 +12,11 @@ import '../providers/chat_provider.dart';
 import '../providers/config_provider.dart';
 import '../services/audio_playback_service.dart';
 import '../services/audio_service.dart';
-import '../services/file_service.dart';
 import '../services/foreground_service.dart';
-import '../models/chat_event.dart';
+import '../models/botapi_event.dart';
 import '../models/message.dart';
 import '../widgets/attachment_panel.dart';
-import '../widgets/session_drawer.dart';
+import '../widgets/account_drawer.dart';
 import '../util/lru_cache.dart';
 import 'settings_screen.dart';
 
@@ -54,7 +53,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   double _w = 360;
-  int _lastLen = 0, _lastTC = 0, _lastTR = 0;
+  int _lastLen = 0, _lastTS = 0;
   ConnState _lastConn = ConnState.disconnected;
   // 消息列表引用:每次 updateUploadProgress/createPendingMedia 等都会产生新列表,
   // 用 identical 检测"列表内容变更"(含进度/状态等就地更新),触发重建;
@@ -77,6 +76,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   // 重建整树(增删尾部流式 sliver 项);流式内容逐字变化只由尾部 Consumer
   // 订阅 select((s)=>s.streamingText) 单独重建,不重建历史列表。
   bool _streamingActive = false;
+  bool _streamingThinkingActive = false;
   // History-load bookkeeping (distinguishes a prepend from a new append so we
   // don't falsely auto-scroll to the latest when older messages load).
   bool _loadingHistory = false;
@@ -139,28 +139,30 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (_initSync) {
       _initSync = false;
       final s = ref.read(chatProvider);
-      _state = s; _lastLen = s.messages.length; _lastTC = s.toolCalls.length;
-      _lastTR = s.toolResults.length;
+      _state = s; _lastLen = s.messages.length; _lastTS = s.toolStatuses.length;
       _lastConn = s.connectionState; _lastMessages = s.messages;
       _streamingActive = s.streamingText != null;
+      _streamingThinkingActive = s.streamingThinking != null;
     }
     ref.listen(chatProvider, (_, n) {
-      // 流式内容逐字变化(n.streamingText)不走 setState,交给尾部 Consumer
+      // 流式内容逐字变化(n.streamingText/streamingThinking)不走 setState,交给尾部 Consumer
       // 自行重建;此处只在结构/状态变化或流式"在场"翻转时重建整树。
       final streamingToggled = (n.streamingText != null) != _streamingActive;
+      final thinkingToggled = (n.streamingThinking != null) != _streamingThinkingActive;
       final needsRebuild = n.messages.length != _lastLen ||
-          n.toolCalls.length != _lastTC ||
-          n.toolResults.length != _lastTR ||
+          n.toolStatuses.length != _lastTS ||
           n.connectionState != _lastConn ||
           n.errorMessage != _state.errorMessage ||
           n.autoPlayVoice != _state.autoPlayVoice ||
-          n.currentSessionName != _state.currentSessionName ||
+          n.currentAccountName != _state.currentAccountName ||
           streamingToggled ||
+          thinkingToggled ||
           !identical(n.messages, _lastMessages);
 
       final prevLen = _lastLen;
       _streamingActive = n.streamingText != null;
-      _lastTC = n.toolCalls.length; _lastTR = n.toolResults.length;
+      _streamingThinkingActive = n.streamingThinking != null;
+      _lastTS = n.toolStatuses.length;
       _lastConn = n.connectionState; _lastMessages = n.messages;
       // A shrink (e.g. reconnect reloading the latest 10) means history was
       // re-armed on the provider side — clear our exhaustion flag too.
@@ -205,11 +207,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     return Scaffold(
       resizeToAvoidBottomInset: true,
-      drawer: const SessionDrawer(),
+      drawer: const AccountDrawer(),
       backgroundColor: isDark ? const Color(0xFF0F0F0F) : const Color(0xFFFAFAFB),
       appBar: _Bar(
         conn: conn, isDark: isDark, error: _state.errorMessage,
-        sessionName: _state.currentSessionName,
+        accountName: _state.currentAccountName,
         streaming: _state.streamingText?.isNotEmpty == true,
         reconnecting: _state.connectionState == ConnState.reconnecting,
         autoPlay: _state.autoPlayVoice,
@@ -424,7 +426,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     });
   }
 
-  int _itemCount() => _state.messages.length + _state.toolCalls.length + _state.toolResults.length + ((_state.streamingText?.isNotEmpty == true) ? 1 : 0);
+  int _itemCount() => _state.messages.length +
+      _state.toolStatuses.length +
+      ((_state.streamingThinking?.isNotEmpty == true) ? 1 : 0) +
+      ((_state.streamingText?.isNotEmpty == true) ? 1 : 0);
 
   Widget _item(int i) {
     final msgs = _state.messages;
@@ -444,9 +449,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       );
     }
     int j = i - msgs.length;
-    if (j < _state.toolCalls.length) return _ToolMsg(tc: _state.toolCalls[j]);
-    j -= _state.toolCalls.length;
-    if (j < _state.toolResults.length) return _ToolResult(tr: _state.toolResults[j]);
+    if (j < _state.toolStatuses.length) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 2),
+        child: _ToolStatus(text: _state.toolStatuses[j]),
+      );
+    }
+    j -= _state.toolStatuses.length;
+    if (j == 0 && _state.streamingThinking?.isNotEmpty == true) {
+      return _ThinkingBlock(text: _state.streamingThinking!, isDark: _isDark);
+    }
     return Consumer(builder: (ctx, ref, _) {
       final st = ref.watch(chatProvider.select((s) => s.streamingText)) ?? '';
       return _Streaming(text: st, bw: _w - 48, isDark: _isDark);
@@ -502,54 +514,48 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     setState(() { _recording = false; _recCancel = false; });
     if (cancel || file == null) return;
 
-    final config = ref.read(configServiceProvider);
-    final fs = FileService(serverUrl: config.serverUrl, apiKey: config.apiKey);
-    final key = ref.read(chatProvider.notifier)
+    final notifier = ref.read(chatProvider.notifier);
+    final key = notifier
         .createPendingMedia(msgType: 'voice', localPath: file.path);
-    final result = await fs.uploadFile(file, 'audio/wav', onProgress: (s, t) {
-      ref.read(chatProvider.notifier).updateUploadProgress(key, t > 0 ? s / t : 0);
+    final id = await notifier.uploadMedia(file, 'audio/wav', onProgress: (s, t) {
+      notifier.updateUploadProgress(key, t > 0 ? s / t : 0);
     });
-    final id = result['attachment_id'] as String?;
     if (id != null && mounted) {
-      ref.read(chatProvider.notifier).finalizeMediaSend(key, id, 'voice');
+      notifier.finalizeMediaSend(key, id, 'voice');
     } else if (mounted) {
-      ref.read(chatProvider.notifier).failMediaUpload(key);
+      notifier.failMediaUpload(key);
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('语音发送失败'), backgroundColor: Colors.redAccent));
     }
   }
 
   Future<void> _sendImage(File file) async {
-    final config = ref.read(configServiceProvider);
-    final fs = FileService(serverUrl: config.serverUrl, apiKey: config.apiKey);
-    final key = ref.read(chatProvider.notifier)
+    final notifier = ref.read(chatProvider.notifier);
+    final key = notifier
         .createPendingMedia(msgType: 'image', localPath: file.path);
-    final result = await fs.uploadFile(file, 'image/jpeg', onProgress: (s, t) {
-      ref.read(chatProvider.notifier).updateUploadProgress(key, t > 0 ? s / t : 0);
+    final id = await notifier.uploadMedia(file, 'image/jpeg', onProgress: (s, t) {
+      notifier.updateUploadProgress(key, t > 0 ? s / t : 0);
     });
-    final id = result['attachment_id'] as String?;
     if (id != null && mounted) {
-      ref.read(chatProvider.notifier).finalizeMediaSend(key, id, 'image');
+      notifier.finalizeMediaSend(key, id, 'image');
     } else if (mounted) {
-      ref.read(chatProvider.notifier).failMediaUpload(key);
+      notifier.failMediaUpload(key);
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('图片上传失败'), backgroundColor: Colors.redAccent));
     }
   }
 
   Future<void> _sendFile(File file, String filename, String mime) async {
-    final config = ref.read(configServiceProvider);
-    final fs = FileService(serverUrl: config.serverUrl, apiKey: config.apiKey);
-    final key = ref.read(chatProvider.notifier)
+    final notifier = ref.read(chatProvider.notifier);
+    final key = notifier
         .createPendingMedia(msgType: 'file', localPath: file.path, content: filename);
-    final result = await fs.uploadFile(file, mime, onProgress: (s, t) {
-      ref.read(chatProvider.notifier).updateUploadProgress(key, t > 0 ? s / t : 0);
+    final id = await notifier.uploadMedia(file, mime, onProgress: (s, t) {
+      notifier.updateUploadProgress(key, t > 0 ? s / t : 0);
     });
-    final id = result['attachment_id'] as String?;
     if (id != null && mounted) {
-      ref.read(chatProvider.notifier).finalizeMediaSend(key, id, 'file');
+      notifier.finalizeMediaSend(key, id, 'file');
     } else if (mounted) {
-      ref.read(chatProvider.notifier).failMediaUpload(key);
+      notifier.failMediaUpload(key);
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('文件上传失败'), backgroundColor: Colors.redAccent));
     }
@@ -921,39 +927,21 @@ class _ImageBubbleState extends ConsumerState<_ImageBubble> {
     if (lp.isNotEmpty) {
       _downloaded = lp;
     } else if (!widget.isMe) {
-      _download();
+      // botapi: provider 在收到事件时已下载媒体到 localPath。
+      // 此处占位 loading，等 didUpdateWidget 带回 localPath。
+      _loading = true;
     }
   }
 
   @override
   void didUpdateWidget(covariant _ImageBubble oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // attachment_saved arrives after the raw image event and swaps in the real
-    // attachment_id. Re-download then (initState already ran with an empty id).
+    // provider 下载完成后把 localPath 贴到消息上。
     if (_downloaded == null && !widget.isMe) {
-      final oldId = (oldWidget.m.attachmentId as String?) ?? '';
-      final newId = (widget.m.attachmentId as String?) ?? '';
-      if (newId.isNotEmpty && newId != oldId && !_loading) {
-        _download();
+      final lp = (widget.m.localPath as String?) ?? '';
+      if (lp.isNotEmpty && lp != (oldWidget.m.localPath as String?) && _loading) {
+        setState(() { _downloaded = lp; _loading = false; });
       }
-    }
-  }
-
-  Future<void> _download() async {
-    final aid = (widget.m.attachmentId as String?) ?? '';
-    if (aid.isEmpty) return;
-    setState(() => _loading = true);
-    try {
-      final config = ref.read(configServiceProvider);
-      final fs = FileService(serverUrl: config.serverUrl, apiKey: config.apiKey);
-      final dlFile = await fs.downloadAttachment(aid);
-      if (dlFile != null && await dlFile.exists() && await dlFile.length() > 0) {
-        if (mounted) setState(() { _downloaded = dlFile.path; _loading = false; });
-      } else {
-        if (mounted) setState(() => _loading = false);
-      }
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -1161,21 +1149,16 @@ class _FileBubbleState extends ConsumerState<_FileBubble> {
   }
 
   Future<void> _open() async {
-    final aid = (widget.m.attachmentId as String?) ?? '';
     final name = (widget.m.content as String?) ?? 'file';
     setState(() => _downloading = true);
     try {
-      final config = ref.read(configServiceProvider);
-      final fs = FileService(serverUrl: config.serverUrl, apiKey: config.apiKey);
+      // botapi: 媒体在收到事件时已由 provider 下载到 localPath（单次有效 URL，无法重取）。
       File? src;
-      // Prefer the local copy for sent files.
       final lp = (widget.m.localPath as String?) ?? '';
       if (lp.isNotEmpty && File(lp).existsSync()) {
         src = File(lp);
-      } else if (aid.isNotEmpty) {
-        src = await fs.downloadAttachment(aid);
       }
-      if (src == null || !await src.exists()) throw Exception('文件下载失败');
+      if (src == null || !await src.exists()) throw Exception('文件未缓存（可能已过期）');
       // Copy to a temp path that keeps the real filename (so apps recognize the type),
       // then let the user choose which application opens it via the system share sheet.
       final safe = name.replaceAll(RegExp(r'[/\\]'), '_');
@@ -1354,46 +1337,91 @@ class _Streaming extends StatelessWidget {
   }
 }
 
-// ====== TOOL ======
-class _ToolMsg extends StatelessWidget {
-  final dynamic tc; const _ToolMsg({required this.tc});
-  @override Widget build(BuildContext ctx) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 2),
-    child: _Inline(c: const Color(0xFF007AFF), t: '🔧 ${tc.name}', body: (tc.args as Map).entries.map((e) => '${e.key}:${e.value}').join('\n')));
+// ====== TOOL STATUS / THINKING ======
+class _ToolStatus extends StatelessWidget {
+  final String text;
+  const _ToolStatus({required this.text});
+  @override
+  Widget build(BuildContext context) => Container(
+        decoration: BoxDecoration(
+            color: const Color(0xFF007AFF).withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(8)),
+        padding: const EdgeInsets.all(8),
+        child: Text(text,
+            style: const TextStyle(
+                color: Color(0xFF007AFF),
+                fontSize: 12,
+                fontFamily: 'monospace')),
+      );
 }
-class _ToolResult extends StatelessWidget {
-  final dynamic tr; const _ToolResult({required this.tr});
-  @override Widget build(BuildContext ctx) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 2),
-    child: _Inline(c: const Color(0xFF34C759), t: '📋 工具结果', body: tr.result as String));
+
+class _ThinkingBlock extends StatefulWidget {
+  final String text;
+  final bool isDark;
+  const _ThinkingBlock({required this.text, required this.isDark});
+  @override
+  State<_ThinkingBlock> createState() => _ThinkingBlockState();
 }
-class _Inline extends StatefulWidget {
-  final Color c; final String t, body;
-  const _Inline({required this.c, required this.t, required this.body});
-  @override State<_Inline> createState() => _InlineState();
-}
-class _InlineState extends State<_Inline> {
-  bool _o = false;
-  @override Widget build(BuildContext ctx) => Container(
-    decoration: BoxDecoration(color: widget.c.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(8)),
-    child: Column(children: [
-      InkWell(onTap: ()=>setState(()=>_o=!_o), child: Padding(padding: const EdgeInsets.all(8), child: Row(children: [
-        Expanded(child: Text(widget.t, style: TextStyle(color: widget.c, fontSize: 13, fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis)),
-        AnimatedRotation(turns:_o?0.5:0, duration: const Duration(milliseconds: 150), child: Icon(Icons.chevron_right, color: widget.c, size: 16)),
-      ]))),
-      if (_o) Container(width: double.infinity, padding: const EdgeInsets.fromLTRB(8,0,8,8), child: Text(widget.body, style: TextStyle(color: widget.c.withValues(alpha: 0.8), fontSize: 11, fontFamily: 'monospace'))),
-    ]));
+
+class _ThinkingBlockState extends State<_ThinkingBlock> {
+  bool _open = false;
+  @override
+  Widget build(BuildContext context) {
+    final fg =
+        widget.isDark ? const Color(0xFF9E9EA4) : const Color(0xFF8A8A8E);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 2),
+      child: Container(
+        decoration: BoxDecoration(
+            color: fg.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(8)),
+        child: Column(children: [
+          InkWell(
+            onTap: () => setState(() => _open = !_open),
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Row(children: [
+                const Icon(Icons.psychology_outlined,
+                    size: 14, color: Color(0xFF8A8A8E)),
+                const SizedBox(width: 6),
+                Expanded(
+                    child: Text('思考过程',
+                        style: TextStyle(
+                            color: fg,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500))),
+                AnimatedRotation(
+                    turns: _open ? 0.5 : 0,
+                    duration: const Duration(milliseconds: 150),
+                    child: Icon(Icons.expand_more, color: fg, size: 16)),
+              ]),
+            ),
+          ),
+          if (_open)
+            Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                child: Text(widget.text,
+                    style: TextStyle(
+                        color: fg,
+                        fontSize: 11,
+                        height: 1.3,
+                        fontFamily: 'monospace'))),
+        ]),
+      ),
+    );
+  }
 }
 
 // ====== APP BAR ======
 class _Bar extends StatelessWidget implements PreferredSizeWidget {
   final bool conn, isDark, streaming, autoPlay, reconnecting;
   final String? error;
-  final String sessionName;
+  final String accountName;
   final VoidCallback onToggleAutoPlay;
   const _Bar({
     required this.conn, required this.isDark, this.error,
-    required this.sessionName,
+    required this.accountName,
     this.streaming = false, this.autoPlay = false, this.reconnecting = false,
     required this.onToggleAutoPlay,
   });
@@ -1410,17 +1438,16 @@ class _Bar extends StatelessWidget implements PreferredSizeWidget {
         : (reconnecting ? const Color(0xFFFF9500) : const Color(0xFFFF6B6B));
     return AppBar(
       backgroundColor: bg, elevation: 0, titleSpacing: 0,
-      // 显式菜单按钮:打开左侧会话抽屉(左边缘右滑亦可)。用 Builder 拿到 Scaffold
-      // 下的 context,确保 openDrawer 指向本页 Scaffold(系统手势争抢边缘时的兜底入口)。
+      // 显式菜单按钮:打开左侧账户抽屉(左边缘右滑亦可)。
       leading: Builder(builder: (c) => IconButton(
         icon: const Icon(Icons.menu_rounded, size: 22),
         onPressed: () => Scaffold.of(c).openDrawer(),
-        tooltip: '会话',
+        tooltip: '账户',
       )),
       title: Padding(
         padding: const EdgeInsets.only(left: 4),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(sessionName,
+          Text(accountName,
               maxLines: 1, overflow: TextOverflow.ellipsis,
               style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: txt)),
           // 流式输出时左上角显示「三个点逐个高亮」的打字动画
