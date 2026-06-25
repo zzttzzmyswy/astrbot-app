@@ -107,6 +107,10 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
   Timer? _alignTimer;
   static const Duration _alignInterval = Duration(seconds: 60);
   bool _resumed = true;
+  // 收到 bot 回复(final)后 2s 触发一次增量对齐：botapi 的 SSE 只推 bot 回复、
+  // 不回显用户消息,故从其它设备/curl 发的用户消息需靠历史对齐同步。挂在回复后
+  // 触发,使其紧随回复到达(而非等 60s 定时)。
+  Timer? _replyCatchupTimer;
 
   ChatNotifier(this._config)
       : _accounts = AccountStore(PrefsAccountStorage(_config.prefs)),
@@ -612,6 +616,32 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       toolStatuses: const [],
     );
     _inflightTextCreatedAt = null;
+    // 收到 bot 回复 → 触发增量对齐,把触发此回复的用户消息(从其它设备发出,
+    // SSE 不回显)尽快同步过来。
+    _scheduleReplyCatchup();
+  }
+
+  /// 去抖：2s 内多次回复只对齐一次。
+  void _scheduleReplyCatchup() {
+    _replyCatchupTimer?.cancel();
+    _replyCatchupTimer = Timer(const Duration(seconds: 2), _catchupAfterReply);
+  }
+
+  /// 回复后增量对齐（不依赖 _resumed,因为回复刚到说明连接活着）。
+  Future<void> _catchupAfterReply() async {
+    if (!mounted) return;
+    final acc = _currentAccount;
+    final http = _http;
+    if (acc == null || http == null) return;
+    try {
+      final localMax = await _cache.maxServerId(acc.id);
+      final res = await http.fetchHistory(since: localMax, limit: 200);
+      if (res.messages.isEmpty) return;
+      await _cache.mergeHistory(res.messages, accountId: acc.id);
+      _client?.sinceCursor = await _cache.maxServerId(acc.id);
+      final refreshed = await _cache.getMessages(accountId: acc.id);
+      if (mounted) _syncAccountState(messages: refreshed);
+    } catch (_) {}
   }
 
   void _flushInterruptedStream() {
@@ -703,6 +733,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     _stateSub?.cancel();
     _connectivitySub?.cancel();
     _alignTimer?.cancel();
+    _replyCatchupTimer?.cancel();
     _client?.dispose();
     super.dispose();
   }

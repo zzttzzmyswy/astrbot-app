@@ -135,8 +135,8 @@ class BotApiHttp {
     }
   }
 
-  /// 拉历史。since/before 为整数 id（可空）。带 transient 重试（冷启动 DNS）。
-  Future<HistoryResult> fetchHistory({int? since, int? before, int limit = 200}) async {
+  /// 拉历史。since/before 为整数 id（可空）。limit 默认 50（最近消息足够）。
+  Future<HistoryResult> fetchHistory({int? since, int? before, int limit = 50}) async {
     try {
       return await withRetry<HistoryResult>(
         () async {
