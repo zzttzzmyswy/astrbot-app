@@ -6,6 +6,7 @@ import 'package:flutter_markdown/flutter_markdown.dart' as md;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:record/record.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:path_provider/path_provider.dart';
 import '../providers/audio_provider.dart';
 import '../providers/chat_provider.dart';
@@ -1259,6 +1260,44 @@ class _FileBubbleState extends ConsumerState<_FileBubble> {
 }
 
 // ====== MARKDOWN ======
+
+/// 共享 markdown 样式表：最终气泡与流式渲染复用，保证视觉一致。
+md.MarkdownStyleSheet _mdStyleSheet(Color fg, bool isDark) {
+  return md.MarkdownStyleSheet(
+    p: TextStyle(color: fg, fontSize: 16, height: 1.35),
+    h1: TextStyle(color: fg, fontSize: 20, fontWeight: FontWeight.bold),
+    h2: TextStyle(color: fg, fontSize: 18, fontWeight: FontWeight.bold),
+    h3: TextStyle(color: fg, fontSize: 17, fontWeight: FontWeight.bold),
+    a: TextStyle(color: const Color(0xFF4A8FE7), decoration: TextDecoration.underline, decorationColor: const Color(0xFF4A8FE7)),
+    code: TextStyle(color: fg, fontSize: 14, fontFamily: 'monospace',
+      backgroundColor: isDark ? const Color(0xFF3A3A3C) : const Color(0xFFE8E8EC)),
+    codeblockDecoration: BoxDecoration(
+      color: isDark ? const Color(0xFF1C1C1E) : const Color(0xFFF2F2F7), borderRadius: BorderRadius.circular(8)),
+    blockquoteDecoration: BoxDecoration(
+      border: Border(left: BorderSide(color: fg.withValues(alpha: 0.35), width: 3))),
+    blockquotePadding: const EdgeInsets.only(left: 12),
+    tableBorder: TableBorder.all(color: fg.withValues(alpha: 0.2), width: 0.5),
+    tableHead: TextStyle(color: fg, fontWeight: FontWeight.bold, fontSize: 14),
+    tableBody: TextStyle(color: fg, fontSize: 14),
+    tableCellsPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    horizontalRuleDecoration: BoxDecoration(
+      border: Border(top: BorderSide(color: fg.withValues(alpha: 0.2)))),
+    strong: TextStyle(color: fg, fontWeight: FontWeight.bold, fontSize: 16),
+    em: TextStyle(color: fg, fontStyle: FontStyle.italic, fontSize: 16),
+    listBullet: TextStyle(color: fg, fontSize: 16), listIndent: 16,
+  );
+}
+
+/// 链接点击：仅放行 http/https，交给系统默认浏览器打开。
+void _launchUrl(String text, String? href, String title) {
+  final url = href ?? text;
+  if (url.isEmpty) return;
+  final uri = Uri.tryParse(url);
+  if (uri == null) return;
+  if (uri.scheme != 'http' && uri.scheme != 'https') return;
+  launchUrl(uri, mode: LaunchMode.externalApplication);
+}
+
 class _MarkdownContent extends StatefulWidget {
   final String text; final Color fg; final bool isDark;
   const _MarkdownContent({required this.text, required this.fg, required this.isDark, super.key});
@@ -1281,30 +1320,12 @@ class _MarkdownContentState extends State<_MarkdownContent> {
     if (cached != null) { _built = cached; return; }
     Future.microtask(() {
       if (!mounted) return;
-      final fg = widget.fg; final isDark = widget.isDark;
-      final style = md.MarkdownStyleSheet(
-        p: TextStyle(color: fg, fontSize: 16, height: 1.35),
-        h1: TextStyle(color: fg, fontSize: 20, fontWeight: FontWeight.bold),
-        h2: TextStyle(color: fg, fontSize: 18, fontWeight: FontWeight.bold),
-        h3: TextStyle(color: fg, fontSize: 17, fontWeight: FontWeight.bold),
-        code: TextStyle(color: fg, fontSize: 14, fontFamily: 'monospace',
-          backgroundColor: isDark ? const Color(0xFF3A3A3C) : const Color(0xFFE8E8EC)),
-        codeblockDecoration: BoxDecoration(
-          color: isDark ? const Color(0xFF1C1C1E) : const Color(0xFFF2F2F7), borderRadius: BorderRadius.circular(8)),
-        blockquoteDecoration: BoxDecoration(
-          border: Border(left: BorderSide(color: fg.withValues(alpha: 0.35), width: 3))),
-        blockquotePadding: const EdgeInsets.only(left: 12),
-        tableBorder: TableBorder.all(color: fg.withValues(alpha: 0.2), width: 0.5),
-        tableHead: TextStyle(color: fg, fontWeight: FontWeight.bold, fontSize: 14),
-        tableBody: TextStyle(color: fg, fontSize: 14),
-        tableCellsPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        horizontalRuleDecoration: BoxDecoration(
-          border: Border(top: BorderSide(color: fg.withValues(alpha: 0.2)))),
-        strong: TextStyle(color: fg, fontWeight: FontWeight.bold, fontSize: 16),
-        em: TextStyle(color: fg, fontStyle: FontStyle.italic, fontSize: 16),
-        listBullet: TextStyle(color: fg, fontSize: 16), listIndent: 16,
+      final w = md.MarkdownBody(
+        data: widget.text,
+        selectable: false,
+        styleSheet: _mdStyleSheet(widget.fg, widget.isDark),
+        onTapLink: _launchUrl,
       );
-      final w = md.MarkdownBody(data: widget.text, selectable: false, styleSheet: style);
       _cache[key] = w;
       if (mounted) setState(() => _built = w);
     });
@@ -1327,7 +1348,14 @@ class _Streaming extends StatelessWidget {
         child: DecoratedBox(
           decoration: BoxDecoration(color: bg, borderRadius: const BorderRadius.only(topLeft: Radius.circular(16), topRight: Radius.circular(16), bottomLeft: Radius.circular(2), bottomRight: Radius.circular(16))),
           child: Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Text(text, style: TextStyle(color: fg, fontSize: 16, height: 1.35))),
+            child: text.isEmpty
+                ? const SizedBox.shrink()
+                : md.MarkdownBody(
+                    data: text,
+                    selectable: false,
+                    styleSheet: _mdStyleSheet(fg, isDark),
+                    onTapLink: _launchUrl,
+                  )),
         )),
       ),
     );
