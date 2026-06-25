@@ -52,7 +52,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   double _w = 360;
-  int _lastLen = 0, _lastTS = 0;
+  int _lastLen = 0;
   ConnState _lastConn = ConnState.disconnected;
   // 消息列表引用:每次 updateUploadProgress/createPendingMedia 等都会产生新列表,
   // 用 identical 检测"列表内容变更"(含进度/状态等就地更新),触发重建;
@@ -138,7 +138,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     if (_initSync) {
       _initSync = false;
       final s = ref.read(chatProvider);
-      _state = s; _lastLen = s.messages.length; _lastTS = s.toolStatuses.length;
+      _state = s; _lastLen = s.messages.length;
       _lastConn = s.connectionState; _lastMessages = s.messages;
       _streamingActive = s.streamingText != null;
       _streamingThinkingActive = s.streamingThinking != null;
@@ -149,7 +149,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final streamingToggled = (n.streamingText != null) != _streamingActive;
       final thinkingToggled = (n.streamingThinking != null) != _streamingThinkingActive;
       final needsRebuild = n.messages.length != _lastLen ||
-          n.toolStatuses.length != _lastTS ||
           n.connectionState != _lastConn ||
           n.errorMessage != _state.errorMessage ||
           n.autoPlayVoice != _state.autoPlayVoice ||
@@ -161,7 +160,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final prevLen = _lastLen;
       _streamingActive = n.streamingText != null;
       _streamingThinkingActive = n.streamingThinking != null;
-      _lastTS = n.toolStatuses.length;
       _lastConn = n.connectionState; _lastMessages = n.messages;
       // A shrink (e.g. reconnect reloading the latest 10) means history was
       // re-armed on the provider side — clear our exhaustion flag too.
@@ -426,7 +424,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   }
 
   int _itemCount() => _state.messages.length +
-      _state.toolStatuses.length +
       ((_state.streamingThinking?.isNotEmpty == true) ? 1 : 0) +
       ((_state.streamingText?.isNotEmpty == true) ? 1 : 0);
 
@@ -434,6 +431,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final msgs = _state.messages;
     if (i < msgs.length) {
       final m = msgs[i];
+      // thinking / tool_status：渲染为内联系统块（非聊天气泡），与实时一致。
+      if (m.msgType == 'thinking') {
+        return _ThinkingBlock(text: m.content ?? '', isDark: _isDark);
+      }
+      if (m.msgType == 'tool_status') {
+        return _ToolStatus(text: m.content ?? '');
+      }
       // Date divider when the day changes (or on the first message).
       final curDay = _dayKey(m.createdAt);
       final prevDay = i == 0 ? null : _dayKey(msgs[i - 1].createdAt);
@@ -448,13 +452,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       );
     }
     int j = i - msgs.length;
-    if (j < _state.toolStatuses.length) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 2),
-        child: _ToolStatus(text: _state.toolStatuses[j]),
-      );
-    }
-    j -= _state.toolStatuses.length;
     if (j == 0 && _state.streamingThinking?.isNotEmpty == true) {
       return _ThinkingBlock(text: _state.streamingThinking!, isDark: _isDark);
     }
@@ -1342,16 +1339,19 @@ class _ToolStatus extends StatelessWidget {
   final String text;
   const _ToolStatus({required this.text});
   @override
-  Widget build(BuildContext context) => Container(
-        decoration: BoxDecoration(
-            color: const Color(0xFF007AFF).withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(8)),
-        padding: const EdgeInsets.all(8),
-        child: Text(text,
-            style: const TextStyle(
-                color: Color(0xFF007AFF),
-                fontSize: 12,
-                fontFamily: 'monospace')),
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 48, vertical: 2),
+        child: Container(
+          decoration: BoxDecoration(
+              color: const Color(0xFF007AFF).withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(8)),
+          padding: const EdgeInsets.all(8),
+          child: Text(text,
+              style: const TextStyle(
+                  color: Color(0xFF007AFF),
+                  fontSize: 12,
+                  fontFamily: 'monospace')),
+        ),
       );
 }
 

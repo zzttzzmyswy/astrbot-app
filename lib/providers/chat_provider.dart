@@ -40,7 +40,6 @@ class ChatState {
   final ConnState connectionState;
   final String? streamingText;
   final String? streamingThinking;
-  final List<String> toolStatuses; // 本轮工具状态文本（系统气泡，不并入答案）
   final String? errorMessage;
   final bool autoPlayVoice;
   final List<Account> accounts;
@@ -52,7 +51,6 @@ class ChatState {
     this.connectionState = ConnState.disconnected,
     this.streamingText,
     this.streamingThinking,
-    this.toolStatuses = const [],
     this.errorMessage,
     this.autoPlayVoice = false,
     this.accounts = const [],
@@ -65,7 +63,6 @@ class ChatState {
     ConnState? connectionState,
     String? streamingText,
     String? streamingThinking,
-    List<String>? toolStatuses,
     String? errorMessage,
     bool? autoPlayVoice,
     List<Account>? accounts,
@@ -77,7 +74,6 @@ class ChatState {
         connectionState: connectionState ?? this.connectionState,
         streamingText: streamingText,
         streamingThinking: streamingThinking,
-        toolStatuses: toolStatuses ?? this.toolStatuses,
         errorMessage: errorMessage,
         autoPlayVoice: autoPlayVoice ?? this.autoPlayVoice,
         accounts: accounts ?? this.accounts,
@@ -171,7 +167,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     if (acc == null || http == null) return;
     try {
       final localMax = await _cache.maxServerId(acc.id);
-      final res = await http.fetchHistory(since: localMax, limit: 200);
+      final res = await http.fetchHistory(since: localMax);
       if (res.messages.isEmpty) return; // 已对齐
       await _cache.mergeHistory(res.messages, accountId: acc.id);
       _client?.sinceCursor = await _cache.maxServerId(acc.id);
@@ -241,8 +237,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       state = state.copyWith(
           errorMessage: null,
           streamingText: null,
-          streamingThinking: null,
-          toolStatuses: const []);
+          streamingThinking: null);
       await _ensureAccountsLoaded();
       final acc = _currentAccount;
       if (acc == null) {
@@ -520,8 +515,16 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
 
     if (event.isMessage) {
       if (event.isToolStatus) {
-        state = state.copyWith(
-            toolStatuses: [...state.toolStatuses, event.content ?? '']);
+        // 工具状态持久化为独立系统消息(与历史回放一致),final 后不清空。
+        final msg = LocalMessage(
+          msgType: 'tool_status',
+          content: event.content ?? '',
+          isFromMe: false,
+          status: MessageStatus.sent,
+          createdAt: now,
+        );
+        state = state.copyWith(messages: [...state.messages, msg]);
+        _cache.upsertBotText(msg, accountId: _cacheAccountId);
         return;
       }
       if (event.isMedia) {
@@ -601,6 +604,20 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
   }
 
   void _commitBotText(String full, int now) {
+    // 先把本轮积累的思考落库为独立思考消息(与历史回放一致),再落答案。
+    final thinking = state.streamingThinking;
+    final list = [...state.messages];
+    if (thinking != null && thinking.isNotEmpty) {
+      final thinkMsg = LocalMessage(
+        msgType: 'thinking',
+        content: thinking,
+        isFromMe: false,
+        status: MessageStatus.sent,
+        createdAt: now,
+      );
+      _cache.upsertBotText(thinkMsg, accountId: _cacheAccountId);
+      list.add(thinkMsg);
+    }
     final botMsg = LocalMessage(
       msgType: 'text',
       content: full,
@@ -609,11 +626,11 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       createdAt: now,
     );
     _cache.upsertBotText(botMsg, accountId: _cacheAccountId);
+    list.add(botMsg);
     state = state.copyWith(
-      messages: [...state.messages, botMsg],
+      messages: list,
       streamingText: null,
       streamingThinking: null,
-      toolStatuses: const [],
     );
     _inflightTextCreatedAt = null;
     // 收到 bot 回复 → 触发增量对齐,把触发此回复的用户消息(从其它设备发出,
@@ -635,7 +652,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     if (acc == null || http == null) return;
     try {
       final localMax = await _cache.maxServerId(acc.id);
-      final res = await http.fetchHistory(since: localMax, limit: 200);
+      final res = await http.fetchHistory(since: localMax);
       if (res.messages.isEmpty) return;
       await _cache.mergeHistory(res.messages, accountId: acc.id);
       _client?.sinceCursor = await _cache.maxServerId(acc.id);
@@ -646,18 +663,34 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
 
   void _flushInterruptedStream() {
     final interrupted = state.streamingText;
-    if (interrupted == null || interrupted.trim().isEmpty) return;
+    final thinking = state.streamingThinking;
+    if ((interrupted == null || interrupted.trim().isEmpty) &&
+        (thinking == null || thinking.trim().isEmpty)) return;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final botMsg = LocalMessage(
-      msgType: 'text',
-      content: '$interrupted\n\n_(回复中断,请重试)_',
-      isFromMe: false,
-      status: MessageStatus.sent,
-      createdAt: now,
-    );
-    _cache.upsertBotText(botMsg, accountId: _cacheAccountId);
-    state = state.copyWith(
-        messages: [...state.messages, botMsg], streamingText: null);
+    final list = [...state.messages];
+    if (thinking != null && thinking.trim().isNotEmpty) {
+      final thinkMsg = LocalMessage(
+        msgType: 'thinking',
+        content: thinking,
+        isFromMe: false,
+        status: MessageStatus.sent,
+        createdAt: now,
+      );
+      _cache.upsertBotText(thinkMsg, accountId: _cacheAccountId);
+      list.add(thinkMsg);
+    }
+    if (interrupted != null && interrupted.trim().isNotEmpty) {
+      final botMsg = LocalMessage(
+        msgType: 'text',
+        content: '$interrupted\n\n_(回复中断,请重试)_',
+        isFromMe: false,
+        status: MessageStatus.sent,
+        createdAt: now,
+      );
+      _cache.upsertBotText(botMsg, accountId: _cacheAccountId);
+      list.add(botMsg);
+    }
+    state = state.copyWith(messages: list, streamingText: null, streamingThinking: null);
   }
 
   // ── 账户管理 ──

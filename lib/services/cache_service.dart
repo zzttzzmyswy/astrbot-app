@@ -251,7 +251,7 @@ class CacheService {
             where: 'id = ?', whereArgs: [live.first['id']]);
       } else {
         await d.insert('messages', {
-          'msg_type': row.type == 'thinking' ? 'thinking' : 'text',
+          'msg_type': row.type, // text | thinking | tool_status（与实时一致）
           'content': row.content,
           'is_from_me': row.role == 'user' ? 1 : 0,
           'status': 'sent',
