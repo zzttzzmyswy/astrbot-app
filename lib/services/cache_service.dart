@@ -26,7 +26,31 @@ class CacheService {
   Future<Database> get db async {
     if (_db != null) return _db!;
     _db = await _initDb();
+    await _ensureSchema(_db!);
     return _db!;
+  }
+
+  /// 幂等保证 schema：即便 onUpgrade 因故未跑（旧库 user_version 与代码版本错位），
+  /// 也补齐 server_id 列与索引，并校正 user_version。避免 mergeHistory 因缺列抛异常。
+  Future<void> _ensureSchema(Database db) async {
+    final cols = await db.rawQuery('PRAGMA table_info(messages)');
+    final names = cols.map((c) => c['name'] as String?).toSet();
+    if (!names.contains('server_id')) {
+      await db.execute('ALTER TABLE messages ADD COLUMN server_id INTEGER');
+    }
+    if (!names.contains('session_id')) {
+      await db.execute('ALTER TABLE messages ADD COLUMN session_id TEXT');
+    }
+    if (!names.contains('local_path')) {
+      await db.execute('ALTER TABLE messages ADD COLUMN local_path TEXT');
+    }
+    try {
+      await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id)');
+      await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_messages_server ON messages(server_id)');
+    } catch (_) {}
+    await db.execute('PRAGMA user_version = 6');
   }
 
   Future<Database> _initDb() async {

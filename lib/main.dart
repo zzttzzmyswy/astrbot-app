@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'services/config_service.dart';
 import 'services/botapi_http.dart';
+import 'services/cache_service.dart';
 import 'services/foreground_service.dart';
 import 'config/app_config.dart';
 import 'screens/chat_screen.dart';
@@ -20,6 +21,11 @@ void main() async {
   // Pre-init SharedPreferences so theme can be read immediately
   final config = ConfigService();
   await config.init();
+  // 消费 v3 迁移留下的 wipe 标记：清空旧 webchat 消息表。
+  // 放这里而非 connect() 内，确保即便 is_configured=false（停在 SetupScreen）也执行。
+  try {
+    await CacheService().wipeIfFlagged(config.prefs);
+  } catch (_) {}
   runApp(ProviderScope(overrides: [
     configServiceProvider.overrideWithValue(config),
   ], child: const AstrBotApp()));

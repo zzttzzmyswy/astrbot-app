@@ -254,7 +254,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       final history = await _cache.getMessages(accountId: acc.id);
       _syncAccountState(messages: history);
 
-      // 校验 token
+      // 校验 token（带 transient 重试，克服冷启动 DNS 解析失败）
       final ok = await _http!.auth();
       if (!ok) {
         state = state.copyWith(
@@ -263,11 +263,15 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
         return;
       }
 
-      // 拉服务端历史并合并补漏
+      // 拉服务端历史并合并补漏（fetchHistory 带 transient 重试）
       final hist = await _http!.fetchHistory(since: 0);
-      await _cache.mergeHistory(hist.messages, accountId: acc.id);
-      final refreshed = await _cache.getMessages(accountId: acc.id);
+      try {
+        await _cache.mergeHistory(hist.messages, accountId: acc.id);
+      } catch (_) {
+        // 合并失败不阻塞 SSE：实时流仍可工作，下次重连再补。
+      }
       final cursor = await _cache.maxServerId(acc.id);
+      final refreshed = await _cache.getMessages(accountId: acc.id);
       _syncAccountState(messages: refreshed);
 
       // 开 SSE 流

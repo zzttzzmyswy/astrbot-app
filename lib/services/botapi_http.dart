@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:http_parser/http_parser.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/history_row.dart';
+import '../util/retry.dart';
 
 /// 规整 serverUrl 为 botapi base：保证以 /api/v1/botapi 结尾、无尾斜杠。
 String botapiBase(String serverUrl) {
@@ -39,20 +40,42 @@ class BotApiHttp {
   Map<String, String> get _authHeaders => {'Authorization': 'Bearer $token'};
 
   /// 校验 token。true=有效；false=无效(401)或不可达。
+  /// 带 transient 重试：冷启动时 Dart HttpClient DNS 解析可能首几次失败
+  /// （系统 curl 能解析但 dart:io 不能），重试几秒后即恢复。
   Future<bool> auth() async {
     try {
-      final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 12),
-        receiveTimeout: const Duration(seconds: 12),
-      ));
-      final res = await dio.post('$_base/auth',
-          data: {'token': token},
-          options: Options(headers: {'Content-Type': 'application/json'}));
-      return res.statusCode == 200;
-    } on DioException catch (e) {
-      // 401 = token 无效；网络不可达也返回 false（调用方据此提示检查地址/token）
-      if (e.response?.statusCode == 401) return false;
-      return false;
+      return await withRetry<bool>(
+        () async {
+          final dio = Dio(BaseOptions(
+            connectTimeout: const Duration(seconds: 12),
+            receiveTimeout: const Duration(seconds: 12),
+          ));
+          final res = await dio.post('$_base/auth',
+              data: {'token': token},
+              options: Options(headers: {'Content-Type': 'application/json'}));
+          if (res.statusCode == 200) return true;
+          if (res.statusCode == 401) return false;
+          // 5xx 等：当作可重试的瞬态错误抛出。
+          throw DioException(
+            requestOptions: res.requestOptions,
+            type: DioExceptionType.badResponse,
+            response: res,
+          );
+        },
+        isTransient: (e) {
+          // 连接级（含 DNS host lookup 失败）、超时 → 重试；badResponse(5xx) 也重试。
+          if (e is DioException) {
+            return e.type == DioExceptionType.connectionError ||
+                e.type == DioExceptionType.connectionTimeout ||
+                e.type == DioExceptionType.receiveTimeout ||
+                e.type == DioExceptionType.sendTimeout ||
+                e.type == DioExceptionType.badResponse;
+          }
+          return false;
+        },
+        maxAttempts: 4,
+        delayFor: (i) => Duration(seconds: 1 << i), // 1s,2s,4s
+      );
     } catch (_) {
       return false;
     }
@@ -112,29 +135,51 @@ class BotApiHttp {
     }
   }
 
-  /// 拉历史。since/before 为整数 id（可空）。
+  /// 拉历史。since/before 为整数 id（可空）。带 transient 重试（冷启动 DNS）。
   Future<HistoryResult> fetchHistory({int? since, int? before, int limit = 200}) async {
     try {
-      final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 15),
-        receiveTimeout: const Duration(seconds: 30),
-      ));
-      final q = <String, dynamic>{'limit': limit};
-      if (since != null) q['since'] = since;
-      if (before != null) q['before'] = before;
-      final res = await dio.get('$_base/history',
-          queryParameters: q, options: Options(headers: _authHeaders));
-      if (res.statusCode == 200 && res.data is Map) {
-        final m = res.data as Map<String, dynamic>;
-        final list = (m['messages'] as List?) ?? [];
-        return HistoryResult(
-          messages: list
-              .map((e) => HistoryRow.fromJson(Map<String, dynamic>.from(e as Map)))
-              .toList(),
-          hasMore: (m['has_more'] as bool?) ?? false,
-        );
-      }
-      return const HistoryResult(messages: [], hasMore: false);
+      return await withRetry<HistoryResult>(
+        () async {
+          final dio = Dio(BaseOptions(
+            connectTimeout: const Duration(seconds: 15),
+            receiveTimeout: const Duration(seconds: 30),
+          ));
+          final q = <String, dynamic>{'limit': limit};
+          if (since != null) q['since'] = since;
+          if (before != null) q['before'] = before;
+          final res = await dio.get('$_base/history',
+              queryParameters: q, options: Options(headers: _authHeaders));
+          if (res.statusCode == 200 && res.data is Map) {
+            final m = res.data as Map<String, dynamic>;
+            final list = (m['messages'] as List?) ?? [];
+            return HistoryResult(
+              messages: list
+                  .map((e) => HistoryRow.fromJson(
+                      Map<String, dynamic>.from(e as Map)))
+                  .toList(),
+              hasMore: (m['has_more'] as bool?) ?? false,
+            );
+          }
+          if (res.statusCode == 401) return const HistoryResult(messages: [], hasMore: false);
+          throw DioException(
+            requestOptions: res.requestOptions,
+            type: DioExceptionType.badResponse,
+            response: res,
+          );
+        },
+        isTransient: (e) {
+          if (e is DioException) {
+            return e.type == DioExceptionType.connectionError ||
+                e.type == DioExceptionType.connectionTimeout ||
+                e.type == DioExceptionType.receiveTimeout ||
+                e.type == DioExceptionType.sendTimeout ||
+                e.type == DioExceptionType.badResponse;
+          }
+          return false;
+        },
+        maxAttempts: 4,
+        delayFor: (i) => Duration(seconds: 1 << i),
+      );
     } catch (_) {
       return const HistoryResult(messages: [], hasMore: false);
     }
