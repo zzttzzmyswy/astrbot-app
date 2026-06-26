@@ -220,7 +220,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         autoPlay: _state.autoPlayVoice,
         onToggleAutoPlay: () => ref.read(chatProvider.notifier).setAutoPlayVoice(!_state.autoPlayVoice),
       ),
-      body: Column(children: [
+      body: Center(child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 760),
+        child: Column(children: [
         Expanded(child: n == 0
           ? const Center(child: Text('发送消息开始聊天', style: TextStyle(color: Color(0xFF999999), fontSize: 14)))
           : Stack(children: [
@@ -302,7 +304,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           slashMatches: _slashMatches,
           onPickSlash: _pickSlashCommand,
           onVoiceStart: _startVoice, onVoiceMove: _voiceMove, onVoiceEnd: _endVoice),
-      ]),
+        ])),
+      ),
     );
   }
 
