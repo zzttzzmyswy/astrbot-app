@@ -220,9 +220,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         autoPlay: _state.autoPlayVoice,
         onToggleAutoPlay: () => ref.read(chatProvider.notifier).setAutoPlayVoice(!_state.autoPlayVoice),
       ),
-      body: Center(child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 760),
-        child: Column(children: [
+      body: Column(children: [
         Expanded(child: n == 0
           ? const Center(child: Text('发送消息开始聊天', style: TextStyle(color: Color(0xFF999999), fontSize: 14)))
           : Stack(children: [
@@ -304,8 +302,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           slashMatches: _slashMatches,
           onPickSlash: _pickSlashCommand,
           onVoiceStart: _startVoice, onVoiceMove: _voiceMove, onVoiceEnd: _endVoice),
-        ])),
-      ),
+      ]),
     );
   }
 
@@ -1171,7 +1168,12 @@ class _FileBubbleState extends ConsumerState<_FileBubble> {
       final tmp = await getTemporaryDirectory();
       final dest = File('${tmp.path}/astrbot_$safe');
       await dest.writeAsBytes(await src.readAsBytes());
-      await Share.shareXFiles([XFile(dest.path, name: name, mimeType: _mimeForName(name))]);
+      // 移动端用系统分享面板;桌面(share_plus 未实现 shareXFiles)改用系统默认应用打开。
+      if (Platform.isAndroid || Platform.isIOS) {
+        await Share.shareXFiles([XFile(dest.path, name: name, mimeType: _mimeForName(name))]);
+      } else {
+        await launchUrl(Uri.file(dest.path), mode: LaunchMode.externalApplication);
+      }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('打开失败: $e'), backgroundColor: Colors.redAccent));
