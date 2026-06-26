@@ -38,36 +38,37 @@
 lib/services/platform/
   keep_alive_service.dart   abstract class KeepAliveService { Future<void> init(); Future<void> start(); Future<void> stop(); }
   permission_service.dart   abstract class PermissionService { Future<bool> hasMic(); Future<bool> requestMic(); }
-  update_service.dart       abstract class UpdateService { Future<void> apply(UpdateInfo info); }
-  oem_service.dart          abstract class OemService { OemInfo? get(); bool openBatterySettings(); }
+  update_applier.dart       abstract class UpdateApplier { String get actionLabel; Future<void> apply(UpdateInfo info, {void Function(double p)? onProgress}); }
   impl/
     keep_alive_mobile.dart     → flutter_foreground_task（搬迁自现 foreground_service.dart）
     keep_alive_desktop.dart    → 全 no-op，仅 log
     permission_mobile.dart     → record.hasPermission（仅麦克风；通知权限归 keep_alive_mobile 由 flutter_foreground_task 处理）
     permission_desktop.dart    → 永远返回 granted，不调用任何插件
-    update_mobile.dart         → 下载 APK + 原生 installApk MethodChannel（搬迁自 ApkInstaller）
-    update_desktop.dart        → url_launcher 打开 release URL，不下载
-    oem_mobile.dart            → MethodChannel getOemInfo / openAppLaunchSettings（搬迁自 DeviceOemService）
-    oem_desktop.dart           → get() 返回 null；openBatterySettings() 返回 false
+    update_mobile.dart         → UpdateService.download(info.apkUrl) + 原生 installApk MethodChannel（搬迁自 ApkInstaller）
+    update_desktop.dart        → url_launcher 打开 info.apkUrl（GitHub release 资产页），不下载
 
 lib/providers/platform_providers.dart
   final keepAliveProvider   = Provider<KeepAliveService>((ref) => Platform.isAndroid ? MobileKeepAlive() : DesktopKeepAlive());
   final permissionProvider  = Provider<PermissionService>((ref) => Platform.isAndroid ? MobilePermission() : DesktopPermission());
-  final updateProvider      = Provider<UpdateService>((ref) => Platform.isAndroid ? MobileUpdate() : DesktopUpdate());
-  final oemProvider         = Provider<OemService>((ref) => Platform.isAndroid ? MobileOem() : DesktopOem());
+  final updateApplierProvider = Provider<UpdateApplier>((ref) => Platform.isAndroid ? MobileUpdateApplier() : DesktopUpdateApplier());
 ```
 
-### 数据模型
+### 复用现有模型，不新建
 
-- `UpdateInfo { String version; String releaseUrl; String? notes; int? sizeBytes; }` — 共享，版本检查（http）产出，喂给 `UpdateService.apply`。
-- `OemInfo { String manufacturer; String brand; bool hasPowerGenie; }` — 已有结构，提炼为模型类。
+- `UpdateInfo`（`lib/services/update_service.dart` 已有：tag/version/notes/apkUrl/apkSize）——直接用作 `UpdateApplier.apply` 入参。
+- `UpdateService`（已有：check + download，平台无关）——保持不动，`UpdateApplier` 仅负责最后的「安装/打开」步骤。
+- `OemInfo`（`lib/util/oem_whitelist.dart` 已有）——OEM 不抽象（见下）。
+
+### OEM 不抽象（减范围）
+
+现有 `DeviceOemService.getInfo()` 已 `try/catch MissingPluginException` 返回 `OemInfo.unknown`，桌面天然安全（`isValid=false` → 设置页不显示引导卡）。`openAppLaunchSettings()` 同样 try/catch 返回 false。**保持原样不动**，不新建 `OemService` 接口。
 
 ### 旧代码归宿
 
 - `foreground_service.dart`（裸函数 + `keepAliveStartCallback` 顶层注解）→ 内容并入 `keep_alive_mobile.dart`；`keepAliveStartCallback` 仍须顶层 `@pragma('vm:entry-point')`，保留在 mobile 实现文件顶层。
 - `apk_installer.dart`（静态 channel 调用）→ 并入 `update_mobile.dart`。
-- `device_oem_service.dart` → 并入 `oem_mobile.dart`。
 - `AudioService.hasPermission()` → 改读 `ref.watch(permissionProvider)`；录音 `start` 前调 `requestMic()`。
+- `DeviceOemService` 不动。
 
 ---
 
@@ -77,8 +78,8 @@ lib/providers/platform_providers.dart
 |:--|:--|:--|
 | 前台保活 | flutter_foreground_task 常驻通知 | no-op |
 | 麦克风权限 | `record.hasPermission()` + 请求 | 永远 granted |
-| 应用更新 | 检测→下载 APK→原生 `installApk` | 检测→`url_launcher` 开 release 页 |
-| OEM 电池白名单 | MethodChannel | `get()` 返回 null，设置页隐藏卡片 |
+| 应用更新 | 检测→下载 APK→原生 `installApk` | 检测→`url_launcher` 开 release 资产页（不下载） |
+| OEM 电池白名单 | MethodChannel（已 try/catch） | 同代码，`MissingPluginException`→`OemInfo.unknown`→隐藏卡片（无需改） |
 | 通知权限 | Android 13+ 请求（并入保活 init） | n/a |
 
 ## 基础设施
@@ -133,11 +134,9 @@ return Platform.isAndroid ? WithForegroundTask(child: app) : app;
 ## 文件清单（预估）
 
 新增：
-- `lib/services/platform/keep_alive_service.dart` + impl ×2
+- `lib/services/platform/keep_alive_service.dart` + impl ×2（mobile/desktop）
 - `lib/services/platform/permission_service.dart` + impl ×2
-- `lib/services/platform/update_service.dart` + impl ×2
-- `lib/services/platform/oem_service.dart` + impl ×2
-- `lib/models/update_info.dart`、`lib/models/oem_info.dart`
+- `lib/services/platform/update_applier.dart` + impl ×2
 - `lib/providers/platform_providers.dart`
 - `windows/`、`linux/` runner（`flutter create` 生成后改尺寸）
 - `.github/workflows/build-windows.yml`
@@ -146,10 +145,12 @@ return Platform.isAndroid ? WithForegroundTask(child: app) : app;
 修改：
 - `lib/main.dart`（FFI init + WithForegroundTask 平台二选一）
 - `lib/screens/chat_screen.dart`（宽窗居中列）
-- `lib/screens/settings_screen.dart`（OEM 卡片按 `OemInfo?` 显隐；更新按钮经 `updateProvider`）
+- `lib/screens/settings_screen.dart`（更新按钮经 `updateApplierProvider`，label/action 双平台）
 - `lib/services/audio_service.dart`（权限经 `permissionProvider`）
-- `lib/providers/chat_provider.dart`（保活/连接经 `keepAliveProvider`；连接性监听保持）
-- `pubspec.yaml`（+ `sqflite_common_ffi`；桌面平台生效）
+- `lib/providers/chat_provider.dart`（保活经 `keepAliveProvider`）
+- `pubspec.yaml`（+ `sqflite_common_ffi`）
 
 删除/并入：
-- `lib/services/foreground_service.dart`、`apk_installer.dart`、`device_oem_service.dart` 内容并入对应 mobile impl（文件可删或留空转出）。
+- `lib/services/foreground_service.dart` → 并入 `keep_alive_mobile.dart`（删原文件）
+- `lib/services/apk_installer.dart` → 并入 `update_mobile.dart`（删原文件）
+- `lib/services/device_oem_service.dart` 不动。
