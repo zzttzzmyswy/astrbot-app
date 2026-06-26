@@ -1,6 +1,8 @@
 // lib/services/cache_service.dart
+import 'dart:io' show Platform;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:path_provider/path_provider.dart';
 import '../models/message.dart';
 import '../models/history_row.dart';
 
@@ -54,7 +56,15 @@ class CacheService {
   }
 
   Future<Database> _initDb() async {
-    final dbPath = await getDatabasesPath();
+    final String dbPath;
+    if (Platform.isWindows || Platform.isLinux) {
+      // 桌面(FFI)下 getDatabasesPath() 是 CWD 相对(.dart_tool/...),从不同目录启动会丢历史;
+      // 改用应用支持目录(稳定、按用户隔离)。移动端沿用系统 databases 目录不变。
+      final dir = await getApplicationSupportDirectory();
+      dbPath = dir.path;
+    } else {
+      dbPath = await getDatabasesPath();
+    }
     final path = '$dbPath/astrbot_messages.db';
     return openDatabase(
       path,
