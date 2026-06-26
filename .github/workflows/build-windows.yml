@@ -48,7 +48,15 @@ jobs:
           '@ | Set-Content -Path sfx.nsi -Encoding ASCII
       - name: Build self-extracting exe
         shell: pwsh
-        run: makensis sfx.nsi
+        run: |
+          $makensis = Get-Command makensis -ErrorAction SilentlyContinue
+          if (-not $makensis) {
+            $cand = @("${env:ProgramFiles(x86)}\NSIS\makensis.exe", "${env:ProgramFiles}\NSIS\makensis.exe")
+            $found = $cand | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $found) { throw "makensis not found; install NSIS" }
+            $makensis = $found
+          }
+          & $makensis sfx.nsi
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
