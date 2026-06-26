@@ -94,12 +94,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   bool _recording = false;
   double _recAmplitude = 0;
   bool _recCancel = false;
-  final _audioService = AudioService();
+  late final AudioService _audioService;
   StreamSubscription<Amplitude>? _recSub;
 
   @override
   void initState() {
     super.initState();
+    _audioService = AudioService(ref.read(permissionProvider));
     _scrollCtrl.addListener(() {
       if (!_scrollCtrl.hasClients) return;
       final pos = _scrollCtrl.position;

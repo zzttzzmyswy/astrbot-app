@@ -3,17 +3,20 @@ import 'dart:io';
 import 'package:record/record.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:path_provider/path_provider.dart';
+import 'platform/permission_service.dart';
 
 class AudioService {
   final _recorder = AudioRecorder();
   final _player = AudioPlayer();
   String? _recordingPath;
+  final PermissionService _permission;
 
-  Future<bool> hasPermission() async {
-    return await _recorder.hasPermission();
-  }
+  AudioService(this._permission);
+
+  Future<bool> hasPermission() async => _permission.hasMic();
 
   Future<void> startRecording() async {
+    if (!await _permission.requestMic()) return; // 未授权不录
     final dir = await getTemporaryDirectory();
     _recordingPath = '${dir.path}/draft_record.wav';
     await _recorder.start(
