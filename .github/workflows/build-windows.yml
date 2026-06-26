@@ -1,0 +1,42 @@
+name: build-windows
+
+# 桌面第一步:本机是 Linux,无法本地构建 Windows(MSVC 工具链)。
+# 改由 GitHub Actions windows-latest runner 构建,把 Release 目录打 zip
+# 上传到对应 release。
+# - tag(v*)推送时:tag 名即 release tag,自动挂载。
+# - workflow_dispatch:手动指定要挂载的 release tag(用于补已有 release)。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要挂载 Windows zip 的 release tag'
+        required: true
+        default: 'v1.2.8'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.38.6'
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: Zip Release
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath astrbot-windows.zip
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: astrbot-windows.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
