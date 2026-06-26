@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:io' show Platform;
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'services/config_service.dart';
 import 'services/botapi_http.dart';
 import 'services/cache_service.dart';
@@ -15,6 +17,11 @@ final themeModeProvider = StateProvider<ThemeMode>((ref) {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // 桌面(sqflite 无默认 factory)走 FFI;移动端用原生 factory 不变。
+  if (Platform.isWindows || Platform.isLinux) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
   // Initialize the foreground service (keeps the app alive in background so
   // the chat connection is not dropped and no messages are lost).
   initKeepAliveService();
