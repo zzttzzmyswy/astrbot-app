@@ -5,7 +5,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'services/config_service.dart';
 import 'services/botapi_http.dart';
 import 'services/cache_service.dart';
-import 'services/foreground_service.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'config/app_config.dart';
 import 'screens/chat_screen.dart';
 import 'screens/setup_screen.dart';
@@ -22,9 +22,6 @@ void main() async {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
   }
-  // Initialize the foreground service (keeps the app alive in background so
-  // the chat connection is not dropped and no messages are lost).
-  initKeepAliveService();
   // Pre-init SharedPreferences so theme can be read immediately
   final config = ConfigService();
   await config.init();
@@ -56,7 +53,7 @@ class AstrBotApp extends ConsumerWidget {
       child: SafeArea(child: SingleChildScrollView(padding: const EdgeInsets.all(24),
         child: SelectableText('${details.exception}', style: const TextStyle(color: Colors.redAccent, fontSize: 14, fontFamily: 'monospace')))));
 
-    return MaterialApp(
+    final app = MaterialApp(
       title: AppConfig.appName,
       debugShowCheckedModeBanner: false,
       theme: ThemeData.light().copyWith(
@@ -78,5 +75,7 @@ class AstrBotApp extends ConsumerWidget {
         error: (_, __) => const SetupScreen(),
       ),
     );
+    // WithForegroundTask 仅 Android 有实现,桌面碰了 MissingPluginError。
+    return Platform.isAndroid ? WithForegroundTask(child: app) : app;
   }
 }

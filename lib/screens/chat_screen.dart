@@ -12,7 +12,7 @@ import '../providers/audio_provider.dart';
 import '../providers/chat_provider.dart';
 import '../services/audio_playback_service.dart';
 import '../services/audio_service.dart';
-import '../services/foreground_service.dart';
+import '../providers/platform_providers.dart';
 import '../models/botapi_event.dart';
 import '../models/message.dart';
 import '../widgets/attachment_panel.dart';
@@ -112,8 +112,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       ref.read(chatProvider.notifier).connect();
       ref.read(chatProvider.notifier).attachPlayback(ref.read(audioPlaybackProvider.notifier));
       // Keep the process alive in the background so the chat connection
-      // persists and messages are not lost.
-      startKeepAliveService();
+      // persists and messages are not lost. 桌面经 DesktopKeepAlive no-op。
+      () async {
+        final ka = ref.read(keepAliveProvider);
+        await ka.init();
+        await ka.start();
+      }();
     });
   }
 
