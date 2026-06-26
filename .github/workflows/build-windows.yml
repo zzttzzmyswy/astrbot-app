@@ -1,10 +1,8 @@
 name: build-windows
 
-# 桌面第一步:本机是 Linux,无法本地构建 Windows(MSVC 工具链)。
-# 改由 GitHub Actions windows-latest runner 构建,把 Release 目录打 zip
-# 上传到对应 release。
-# - tag(v*)推送时:tag 名即 release tag,自动挂载。
-# - workflow_dispatch:手动指定要挂载的 release tag(用于补已有 release)。
+# 桌面单文件:windows-latest runner 构建,用 NSIS 打成自解压 exe(双击静默解压到
+# %TEMP%\astrbot_app 并启动 astrbot_app.exe)。产物 astrbot-windows.exe 挂 release。
+# tag(v*)推送时:tag 名即 release tag。workflow_dispatch:手动指定 release tag。
 
 on:
   push:
@@ -12,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要挂载 Windows zip 的 release tag'
+        description: '要挂载 Windows exe 的 release tag'
         required: true
-        default: 'v1.2.8'
+        default: 'v1.3.0'
 
 permissions:
   contents: write
@@ -31,12 +29,29 @@ jobs:
       - run: flutter config --enable-windows-desktop
       - run: flutter pub get
       - run: flutter build windows --release
-      - name: Zip Release
+      - name: Write NSIS self-extractor script
         shell: pwsh
-        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath astrbot-windows.zip
+        run: |
+          @'
+          !define APPNAME "AstrBot"
+          Name "${APPNAME}"
+          OutFile "astrbot-windows.exe"
+          RequestExecutionLevel user
+          ShowInstDetails nevershow
+          SilentInstall silent
+          SetCompressor /SOLID lzma
+          Section
+            SetOutPath "$TEMP\astrbot_app"
+            File /r "build\windows\x64\runner\Release\*"
+            Exec "$TEMP\astrbot_app\astrbot_app.exe"
+          SectionEnd
+          '@ | Set-Content -Path sfx.nsi -Encoding ASCII
+      - name: Build self-extracting exe
+        shell: pwsh
+        run: makensis sfx.nsi
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          files: astrbot-windows.zip
+          files: astrbot-windows.exe
           token: ${{ secrets.GITHUB_TOKEN }}
