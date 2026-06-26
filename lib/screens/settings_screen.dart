@@ -8,7 +8,7 @@ import '../providers/config_provider.dart';
 import '../services/config_service.dart';
 import '../services/cache_service.dart';
 import '../services/update_service.dart';
-import '../services/apk_installer.dart';
+import '../providers/platform_providers.dart';
 import '../services/device_oem_service.dart';
 import '../util/oem_whitelist.dart';
 import '../widgets/oem_whitelist_dialog.dart';
@@ -164,13 +164,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 }
 
 /// 检查更新对话框（沿用既有实现）。
-class _UpdateDialog extends StatefulWidget {
+class _UpdateDialog extends ConsumerStatefulWidget {
   const _UpdateDialog();
   @override
-  State<_UpdateDialog> createState() => _UpdateDialogState();
+  ConsumerState<_UpdateDialog> createState() => _UpdateDialogState();
 }
 
-class _UpdateDialogState extends State<_UpdateDialog> {
+class _UpdateDialogState extends ConsumerState<_UpdateDialog> {
   final UpdateService _svc = UpdateService();
   _S _s = _S.checking;
   UpdateCheck? _check;
@@ -201,17 +201,17 @@ class _UpdateDialogState extends State<_UpdateDialog> {
   Future<void> _downloadAndInstall() async {
     final info = _check?.latest;
     if (info == null) return;
+    final applier = ref.read(updateApplierProvider);
     setState(() {
       _s = _S.downloading;
       _progress = 0;
     });
     try {
-      final path = await _svc.download(info.apkUrl, onProgress: (p) {
+      await applier.apply(info, onProgress: (p) {
         if (mounted) setState(() => _progress = p);
       });
       if (!mounted) return;
       setState(() => _s = _S.installing);
-      await ApkInstaller.install(path);
     } catch (e) {
       if (mounted) {
         _check = UpdateCheck(
@@ -241,7 +241,7 @@ class _UpdateDialogState extends State<_UpdateDialog> {
             onPressed: () => Navigator.pop(context),
             child: const Text('以后再说')),
         FilledButton(
-            onPressed: _downloadAndInstall, child: const Text('立即更新')),
+            onPressed: _downloadAndInstall, child: Text(ref.watch(updateApplierProvider).actionLabel)),
       ],
       if (_s == _S.latest || _s == _S.error)
         TextButton(
