@@ -39,9 +39,9 @@ class UpdateCheck {
 
 class UpdateService {
   /// GitHub 仓库(owner/name)。公开仓库,未认证调用(60次/小时,手动检查足够)。
-  static const String repo = 'zzttzzmyswy/astrbot-app';
+  static const String repo = 'zzttzzmyswy/astrbot-botapi-client';
   static const String _apiBase =
-      'https://api.github.com/repos/zzttzzmyswy/astrbot-app/releases/latest';
+      'https://api.github.com/repos/zzttzzmyswy/astrbot-botapi-client/releases/latest';
 
   Future<String> currentVersion() async {
     final info = await PackageInfo.fromPlatform();
