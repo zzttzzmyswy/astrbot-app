@@ -524,8 +524,11 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
           status: MessageStatus.sent,
           createdAt: now,
         );
-        state = state.copyWith(messages: [...state.messages, msg]);
-        _cache.upsertBotText(msg, accountId: _cacheAccountId);
+        // 仅当 DB 真正插入才入内存列表,避免重复处理致双行(与 _commitBotText 一致)。
+        final inserted = await _cache.upsertBotText(msg, accountId: _cacheAccountId);
+        if (inserted) {
+          state = state.copyWith(messages: [...state.messages, msg]);
+        }
         return;
       }
       if (event.isMedia) {
@@ -539,12 +542,12 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       }
       if (event.isFinalText) {
         final full = event.content ?? '';
-        _commitBotText(full, now);
+        await _commitBotText(full, now);
         return;
       }
       // message text 非 streaming 非 final（罕见，按完整处理）
       if (event.type == 'text' && (event.content ?? '').isNotEmpty) {
-        _commitBotText(event.content!, now);
+        await _commitBotText(event.content!, now);
       }
     }
   }
@@ -604,7 +607,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     return f?.path;
   }
 
-  void _commitBotText(String full, int now) {
+  Future<void> _commitBotText(String full, int now) async {
     // 先把本轮积累的思考落库为独立思考消息(与历史回放一致),再落答案。
     final thinking = state.streamingThinking;
     final list = [...state.messages];
@@ -616,8 +619,8 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
         status: MessageStatus.sent,
         createdAt: now,
       );
-      _cache.upsertBotText(thinkMsg, accountId: _cacheAccountId);
-      list.add(thinkMsg);
+      final tInserted = await _cache.upsertBotText(thinkMsg, accountId: _cacheAccountId);
+      if (tInserted) list.add(thinkMsg);
     }
     final botMsg = LocalMessage(
       msgType: 'text',
@@ -626,8 +629,11 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       status: MessageStatus.sent,
       createdAt: now,
     );
-    _cache.upsertBotText(botMsg, accountId: _cacheAccountId);
-    list.add(botMsg);
+    // 仅当 DB 真正插入(非重复)才入内存列表:upsertBotText 已按内容+5min 窗去重,
+    // 若本回合已 commit 过(如 final 被重复处理),此处不再追加,使内存与 DB 一致,
+    // 避免 UI 出现「两条一模一样→2s 历史刷新回一条」的闪烁。
+    final inserted = await _cache.upsertBotText(botMsg, accountId: _cacheAccountId);
+    if (inserted) list.add(botMsg);
     state = state.copyWith(
       messages: list,
       streamingText: null,

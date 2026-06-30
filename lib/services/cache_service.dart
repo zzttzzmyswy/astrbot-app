@@ -1,5 +1,6 @@
 // lib/services/cache_service.dart
 import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path_provider/path_provider.dart';
@@ -24,6 +25,17 @@ HistoryMergeAction historyMergePlan({
 
 class CacheService {
   static Database? _db;
+
+  /// 测试 seams：注入数据库路径（如 inMemoryDatabasePath）绕过平台路径解析。
+  /// 生产代码不应用；仅用于单测隔离 DB。
+  @visibleForTesting
+  static String? dbPathOverride;
+
+  /// 测试 seams：重置单例，使下一次 db 访问重建（用于隔离每个用例的内存库）。
+  @visibleForTesting
+  static void resetDbForTesting() {
+    _db = null;
+  }
 
   Future<Database> get db async {
     if (_db != null) return _db!;
@@ -55,7 +67,14 @@ class CacheService {
     await db.execute('PRAGMA user_version = 6');
   }
 
-  Future<Database> _initDb() async {
+  Future<Database> _initDb() {
+    if (dbPathOverride != null) {
+      return _open(dbPathOverride!);
+    }
+    return _initPlatformDb();
+  }
+
+  Future<Database> _initPlatformDb() async {
     final String dbPath;
     if (Platform.isWindows || Platform.isLinux) {
       // 桌面(FFI)下 getDatabasesPath() 是 CWD 相对(.dart_tool/...),从不同目录启动会丢历史;
@@ -65,12 +84,14 @@ class CacheService {
     } else {
       dbPath = await getDatabasesPath();
     }
-    final path = '$dbPath/astrbot_messages.db';
-    return openDatabase(
-      path,
-      version: 6,
-      onCreate: (db, version) async {
-        await db.execute('''
+    return _open('$dbPath/astrbot_messages.db');
+  }
+
+  Future<Database> _open(String path) => openDatabase(
+        path,
+        version: 6,
+        onCreate: (db, version) async {
+          await db.execute('''
           CREATE TABLE messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             msg_type TEXT NOT NULL,
@@ -84,31 +105,31 @@ class CacheService {
             server_id INTEGER
           )
         ''');
-        await _dedupMessages(db);
-        await _buildSessionIndex(db);
-        await _buildServerIndex(db);
-      },
-      onUpgrade: (db, oldV, newV) async {
-        if (oldV < 2) {
-          await db.execute('ALTER TABLE messages ADD COLUMN local_path TEXT');
-        }
-        if (oldV < 4) {
-          // 一次性清理存量重复行（详见 _dedupMessages）。
           await _dedupMessages(db);
-        }
-        if (oldV < 5) {
-          // 多会话：消息按 session_id 分区。
-          await db.execute('ALTER TABLE messages ADD COLUMN session_id TEXT');
           await _buildSessionIndex(db);
-        }
-        if (oldV < 6) {
-          // botapi：历史行带 server_id（int），用于去重。
-          await db.execute('ALTER TABLE messages ADD COLUMN server_id INTEGER');
           await _buildServerIndex(db);
-        }
-      },
-    );
-  }
+        },
+        onUpgrade: (db, oldV, newV) async {
+          if (oldV < 2) {
+            await db.execute('ALTER TABLE messages ADD COLUMN local_path TEXT');
+          }
+          if (oldV < 4) {
+            // 一次性清理存量重复行（详见 _dedupMessages）。
+            await _dedupMessages(db);
+          }
+          if (oldV < 5) {
+            // 多会话：消息按 session_id 分区。
+            await db.execute('ALTER TABLE messages ADD COLUMN session_id TEXT');
+            await _buildSessionIndex(db);
+          }
+          if (oldV < 6) {
+            // botapi：历史行带 server_id（int），用于去重。
+            await db.execute('ALTER TABLE messages ADD COLUMN server_id INTEGER');
+            await _buildServerIndex(db);
+          }
+        },
+      );
+
 
   Future<void> _buildSessionIndex(Database db) async {
     try {
@@ -165,8 +186,11 @@ class CacheService {
   }
 
   /// 插入 bot 文本消息，若近 5 分钟内已存在相同内容(!is_from_me)则跳过。
-  Future<void> upsertBotText(LocalMessage msg, {String? accountId}) async {
+  /// 返回是否真正插入（false=已存在被去重）。调用方据此决定是否入内存列表，
+  /// 保证内存 state.messages 与 DB 去重一致，避免「两条→几秒后刷新为一条」。
+  Future<bool> upsertBotText(LocalMessage msg, {String? accountId}) async {
     final d = await db;
+    bool inserted = false;
     await d.transaction((txn) async {
       final rows = await txn.query(
         'messages',
@@ -181,8 +205,10 @@ class CacheService {
       );
       if (rows.isEmpty) {
         await txn.insert('messages', msg.toMap()..['session_id'] = accountId);
+        inserted = true;
       }
     });
+    return inserted;
   }
 
   Future<bool> hasAttachmentId(String id, {String? accountId}) async {
@@ -245,16 +271,19 @@ class CacheService {
           whereArgs: [accountId, row.messageId],
           limit: 1);
       if (existing.isNotEmpty) continue; // skip
-      // 查同内容实时行（server_id 为空，内容+角色+时间窗匹配）
+      // 查同内容实时行（server_id 为空,内容+角色匹配,取最近一条）。
+      // 不再用单向 5 分钟时间窗:服务端时钟超前客户端>5min 时窗失效,
+      // 会插入重复行(实测「两条→刷新为一条」)。server_id IS NULL 已限定为
+      // 未贴 id 的实时行(多为本回合刚落库),按内容+角色匹配足够且时钟鲁棒。
       final live = await d.query('messages',
           where:
-              'session_id = ? AND server_id IS NULL AND is_from_me = ? AND content = ? AND created_at > ?',
+              'session_id = ? AND server_id IS NULL AND is_from_me = ? AND content = ?',
           whereArgs: [
             accountId,
             row.role == 'user' ? 1 : 0,
             row.content,
-            (row.timestamp * 1000) - 300000
           ],
+          orderBy: 'created_at DESC',
           limit: 1);
       if (live.isNotEmpty) {
         await d.update('messages', {'server_id': row.messageId},
