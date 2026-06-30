@@ -14,6 +14,7 @@ import '../services/audio_playback_service.dart';
 import '../services/cache_service.dart';
 import '../services/config_service.dart';
 import '../services/account_store.dart';
+import '../util/stream_text.dart';
 import 'config_provider.dart';
 
 final chatProvider = StateNotifierProvider<ChatNotifier, ChatState>((ref) {
@@ -533,7 +534,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       }
       if (event.isStreamingText) {
         final cur = state.streamingText ?? '';
-        state = state.copyWith(streamingText: cur + (event.content ?? ''));
+        state = state.copyWith(streamingText: accumulateStreamText(cur, event));
         return;
       }
       if (event.isFinalText) {
