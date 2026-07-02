@@ -15,6 +15,7 @@ import '../services/cache_service.dart';
 import '../services/config_service.dart';
 import '../services/account_store.dart';
 import '../util/stream_text.dart';
+import '../util/interrupted_marker.dart';
 import 'config_provider.dart';
 
 final chatProvider = StateNotifierProvider<ChatNotifier, ChatState>((ref) {
@@ -610,7 +611,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
   Future<void> _commitBotText(String full, int now) async {
     // 先把本轮积累的思考落库为独立思考消息(与历史回放一致),再落答案。
     final thinking = state.streamingThinking;
-    final list = [...state.messages];
+    var list = [...state.messages];
     if (thinking != null && thinking.isNotEmpty) {
       final thinkMsg = LocalMessage(
         msgType: 'thinking',
@@ -622,6 +623,14 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
       final tInserted = await _cache.upsertBotText(thinkMsg, accountId: _cacheAccountId);
       if (tInserted) list.add(thinkMsg);
     }
+    // 清除被本轮完整回复覆盖的中断占位行:熄屏假中断时 _flushInterruptedStream
+    // 落库的半截占位行,在 SSE 续传/重连拿到完整 final 后应被替换,避免
+    // 「中断半截 + 完整」并存(占位半截是完整回复的前缀,见 interrupted_marker)。
+    list = list
+        .where((m) => !(m.msgType == 'text' &&
+            !m.isFromMe &&
+            interruptedPlaceholderCoveredBy(m.content, full)))
+        .toList();
     final botMsg = LocalMessage(
       msgType: 'text',
       content: full,
@@ -634,6 +643,8 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     // 避免 UI 出现「两条一模一样→2s 历史刷新回一条」的闪烁。
     final inserted = await _cache.upsertBotText(botMsg, accountId: _cacheAccountId);
     if (inserted) list.add(botMsg);
+    // DB 端兜底清理:本列表之外的占位行(如别处落库、或本回合之前残留)。
+    await _cache.reconcileInterruptedPlaceholders(accountId: _cacheAccountId);
     state = state.copyWith(
       messages: list,
       streamingText: null,
@@ -689,7 +700,7 @@ class ChatNotifier extends StateNotifier<ChatState> with WidgetsBindingObserver 
     if (interrupted != null && interrupted.trim().isNotEmpty) {
       final botMsg = LocalMessage(
         msgType: 'text',
-        content: '$interrupted\n\n_(回复中断,请重试)_',
+        content: '$interrupted$kInterruptedSuffix',
         isFromMe: false,
         status: MessageStatus.sent,
         createdAt: now,

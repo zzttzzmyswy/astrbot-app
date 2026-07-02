@@ -6,6 +6,7 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/message.dart';
 import '../models/history_row.dart';
+import '../util/interrupted_marker.dart';
 
 /// 决定一条历史行如何合并：
 /// - server_id 已在本地存在 → skip
@@ -300,7 +301,52 @@ class CacheService {
         });
       }
     }
+    // 合并完历史行后,清除被完整回复覆盖的中断占位行(熄屏假中断场景)。
+    await reconcileInterruptedPlaceholders(accountId: accountId);
     return maxId;
+  }
+
+  /// 清除被完整 bot 回复覆盖的「中断占位行」。
+  ///
+  /// 熄屏等场景下 SSE 中途断开,`ChatNotifier._flushInterruptedStream` 把半截
+  /// 流式文本加 [kInterruptedSuffix] 落库为占位行。重连/历史对齐随后又拿到
+  /// 完整回复(实时 final 或历史行),因占位行带后缀、content 不同,既有按
+  /// content 精确去重命中不了,导致「一条中断半截 + 一条完整」并存。本方法:
+  /// 占位行去后缀得到的半截,若是某条完整 bot text 行的前缀(流式 delta 累积
+  /// 本就是完整回复的开头),则占位行已被覆盖,删除之。无完整行覆盖(真断连、
+  /// agent 未完成)时占位行保留,用户仍能看到中断提示。每次 mergeHistory
+  /// 末尾自动调用;`ChatNotifier._commitBotText` 在实时 final 到达时也调用。
+  Future<int> reconcileInterruptedPlaceholders({required String accountId}) async {
+    final d = await db;
+    final placeholders = await d.query(
+      'messages',
+      where:
+          "session_id IS ? AND is_from_me = 0 AND msg_type = 'text' AND content LIKE ?",
+      whereArgs: [accountId, '%$kInterruptedSuffix'],
+    );
+    if (placeholders.isEmpty) return 0;
+    // 候选覆盖源:同账户全部 bot text 行,排除其它占位行(后缀结尾)。
+    final fulls = await d.query(
+      'messages',
+      where: "session_id IS ? AND is_from_me = 0 AND msg_type = 'text'",
+      whereArgs: [accountId],
+    );
+    final fullContents = fulls
+        .map((r) => r['content'] as String?)
+        .whereType<String>()
+        .where((c) => !isInterruptedPlaceholder(c))
+        .toList();
+    if (fullContents.isEmpty) return 0;
+    int removed = 0;
+    for (final p in placeholders) {
+      final prefix = interruptedPrefix(p['content'] as String?);
+      if (prefix == null || prefix.isEmpty) continue;
+      if (fullContents.any((f) => f.startsWith(prefix))) {
+        await d.delete('messages', where: 'id = ?', whereArgs: [p['id']]);
+        removed++;
+      }
+    }
+    return removed;
   }
 
   /// 当前账户本地最大 server_id（用于 stream since 游标；无则 0）。
